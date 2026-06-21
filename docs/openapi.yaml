@@ -1,0 +1,748 @@
+openapi: 3.0.3
+info:
+  title: Nucleus API
+  version: 0.1.0
+  description: |
+    HTTP API for **Nucleus**, a RAG-oriented database engine. Upload raw
+    documents (pdf, docx, xlsx, html, md, txt…); Nucleus extracts, chunks,
+    embeds and indexes them in-process, then answers natural-language searches
+    with hybrid (vector + BM25) retrieval and optional reranking.
+
+    Authentication is a bearer **API token** (`Authorization: Bearer nuc_…`).
+    Tokens carry per-domain scopes (`Read` < `Write` < `Admin`). The first admin
+    token is minted at server bootstrap and written to a file (see deployment
+    docs). `/healthz`, `/readyz` and `/metrics` need no auth.
+  license:
+    name: MIT OR Apache-2.0
+servers:
+  - url: http://127.0.0.1:8080
+    description: Local default
+  - url: "{scheme}://{host}:{port}"
+    description: Custom
+    variables:
+      scheme: { default: "http", enum: ["http", "https"] }
+      host: { default: "localhost" }
+      port: { default: "8080" }
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: health
+  - name: domains
+  - name: documents
+  - name: search
+  - name: tags
+  - name: subdomains
+  - name: chunks
+  - name: jobs
+  - name: tokens
+  - name: maintenance
+  - name: backups
+
+paths:
+  /healthz:
+    get:
+      tags: [health]
+      summary: Liveness probe
+      security: []
+      responses:
+        "200":
+          description: Always "ok"
+          content:
+            text/plain: { schema: { type: string, example: ok } }
+
+  /readyz:
+    get:
+      tags: [health]
+      summary: Readiness probe (checks storage)
+      security: []
+      responses:
+        "200":
+          description: Storage reachable
+          content:
+            text/plain: { schema: { type: string, example: ready } }
+        "500": { $ref: "#/components/responses/Error" }
+
+  /metrics:
+    get:
+      tags: [health]
+      summary: Prometheus-style metrics (plain text)
+      security: []
+      responses:
+        "200":
+          description: Metrics exposition
+          content:
+            text/plain: { schema: { type: string } }
+
+  /v1/domains:
+    post:
+      tags: [domains]
+      summary: Create a domain (admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateDomainReq" }
+      responses:
+        "200":
+          description: Created domain
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/Domain" } }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+    get:
+      tags: [domains]
+      summary: List domains
+      responses:
+        "200":
+          description: All domains
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Domain" } }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /v1/domains/{id}:
+    get:
+      tags: [domains]
+      summary: Get a domain
+      parameters: [{ $ref: "#/components/parameters/IdPath" }]
+      responses:
+        "200":
+          description: Domain
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/Domain" } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /v1/domains/{id}/documents:
+    post:
+      tags: [documents]
+      summary: Ingest a document from text or pre-split chunks (async)
+      description: |
+        Provide either `text` (the engine chunks it) or `chunks` (already split).
+        `subdomain` and `labels` are resolved by name and created if missing.
+        Returns immediately with a `job_id`; embedding/indexing run in the
+        background. Identical content (by hash) is deduplicated.
+      parameters: [{ $ref: "#/components/parameters/IdPath" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/IngestReq" }
+      responses:
+        "200":
+          description: Document accepted (or duplicate)
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/IngestResp" } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+    get:
+      tags: [documents]
+      summary: List documents in a domain (paginated)
+      parameters:
+        - { $ref: "#/components/parameters/IdPath" }
+        - { $ref: "#/components/parameters/Offset" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: Documents
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Document" } }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /v1/domains/{id}/files:
+    post:
+      tags: [documents]
+      summary: Upload a raw file; the engine extracts text in-process (async)
+      description: |
+        The request body is the raw file bytes. The extension of `filename`
+        selects the extractor (pdf, docx, xlsx, xls, html, md, txt, csv).
+        `subdomain`/`labels`/`tags` are comma-separated query parameters.
+      parameters:
+        - { $ref: "#/components/parameters/IdPath" }
+        - { name: filename, in: query, required: true, schema: { type: string }, description: Original file name (its extension picks the extractor). }
+        - { name: title, in: query, required: false, schema: { type: string } }
+        - { name: subdomain, in: query, required: false, schema: { type: string } }
+        - { name: labels, in: query, required: false, schema: { type: string }, description: Comma-separated label names. }
+        - { name: tags, in: query, required: false, schema: { type: string }, description: Comma-separated existing tag ids. }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: File accepted (or duplicate)
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/UploadResp" } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /v1/domains/{id}/search:
+    post:
+      tags: [search]
+      summary: Search a domain (hybrid retrieval, optional rerank)
+      description: |
+        Provide `query` (text, embedded with the domain model) or `query_vector`
+        (precomputed). Filters (`tags`, `document_ids`, `subdomain`, `filter`)
+        are intersected. An unknown `subdomain` name yields an empty result.
+      parameters: [{ $ref: "#/components/parameters/IdPath" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SearchReq" }
+      responses:
+        "200":
+          description: Ranked hits
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Hit" } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /v1/domains/{id}/tags:
+    post:
+      tags: [tags]
+      summary: Create a tag (label) in a domain
+      parameters: [{ $ref: "#/components/parameters/IdPath" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateTagReq" }
+      responses:
+        "200":
+          description: Created tag
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/Tag" } }
+        "403": { $ref: "#/components/responses/Error" }
+    get:
+      tags: [tags]
+      summary: List tags in a domain
+      parameters: [{ $ref: "#/components/parameters/IdPath" }]
+      responses:
+        "200":
+          description: Tags
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Tag" } }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /v1/domains/{id}/subdomains:
+    post:
+      tags: [subdomains]
+      summary: Create (or get) a subdomain by name
+      parameters: [{ $ref: "#/components/parameters/IdPath" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateSubdomainReq" }
+      responses:
+        "200":
+          description: Subdomain
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/Subdomain" } }
+        "403": { $ref: "#/components/responses/Error" }
+    get:
+      tags: [subdomains]
+      summary: List subdomains in a domain
+      parameters: [{ $ref: "#/components/parameters/IdPath" }]
+      responses:
+        "200":
+          description: Subdomains
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Subdomain" } }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /v1/documents/{id}:
+    get:
+      tags: [documents]
+      summary: Get a document
+      parameters: [{ $ref: "#/components/parameters/IdPath" }]
+      responses:
+        "200":
+          description: Document
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/Document" } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [documents]
+      summary: Delete a document and its chunks
+      parameters: [{ $ref: "#/components/parameters/IdPath" }]
+      responses:
+        "204": { description: Deleted }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /v1/chunks/{id}:
+    get:
+      tags: [chunks]
+      summary: Get a chunk
+      parameters: [{ $ref: "#/components/parameters/IdPath" }]
+      responses:
+        "200":
+          description: Chunk
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/Chunk" } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /v1/chunks/{id}/context:
+    get:
+      tags: [chunks]
+      summary: Get a chunk with neighbouring chunks
+      parameters:
+        - { $ref: "#/components/parameters/IdPath" }
+        - { name: before, in: query, required: false, schema: { type: integer, default: 1, minimum: 0 } }
+        - { name: after, in: query, required: false, schema: { type: integer, default: 1, minimum: 0 } }
+      responses:
+        "200":
+          description: Chunk window in document order
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Chunk" } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /v1/jobs:
+    get:
+      tags: [jobs]
+      summary: List ingest jobs (admin, paginated)
+      parameters:
+        - { $ref: "#/components/parameters/Offset" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: Jobs
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Job" } }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /v1/jobs/{id}:
+    get:
+      tags: [jobs]
+      summary: Get a job's status
+      parameters: [{ $ref: "#/components/parameters/IdPath" }]
+      responses:
+        "200":
+          description: Job
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/Job" } }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /v1/tokens:
+    post:
+      tags: [tokens]
+      summary: Create an API token (admin)
+      description: The plaintext `token` is returned **once** and never again.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateTokenReq" }
+      responses:
+        "200":
+          description: Created token (plaintext shown once)
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/CreateTokenResp" } }
+        "403": { $ref: "#/components/responses/Error" }
+    get:
+      tags: [tokens]
+      summary: List tokens (admin; no secrets)
+      responses:
+        "200":
+          description: Tokens
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/TokenInfo" } }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /v1/tokens/{id}:
+    delete:
+      tags: [tokens]
+      summary: Delete a token (admin, idempotent)
+      parameters: [{ $ref: "#/components/parameters/IdPath" }]
+      responses:
+        "204": { description: Deleted (or already absent) }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /v1/maintenance/persist:
+    post:
+      tags: [maintenance]
+      summary: Flush persistable (HNSW) indexes to disk (admin)
+      responses:
+        "200":
+          description: Number of indexes written
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/PersistResp" } }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /v1/backups:
+    post:
+      tags: [backups]
+      summary: Take a backup now (admin)
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BackupReq" }
+      responses:
+        "200":
+          description: The created backup record
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/BackupRecord" } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+    get:
+      tags: [backups]
+      summary: List the backup catalog (admin)
+      responses:
+        "200":
+          description: Backups, oldest first
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/BackupRecord" } }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /v1/backups/restore:
+    post:
+      tags: [backups]
+      summary: Restore a backup, hot-swapping the engine (admin)
+      description: |
+        Takes a safety full backup of the current state, reconstructs the chosen
+        backup into a new database file, opens it and atomically swaps the live
+        engine onto it (the job queue follows). A restart reopens the restored file.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RestoreReq" }
+      responses:
+        "200":
+          description: Restore completed
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/RestoreResp" } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /v1/backups/schedule:
+    get:
+      tags: [backups]
+      summary: Read the backup schedule (admin)
+      responses:
+        "200":
+          description: Current schedule
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/ScheduleConfig" } }
+        "403": { $ref: "#/components/responses/Error" }
+    post:
+      tags: [backups]
+      summary: Replace the backup schedule at runtime (admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ScheduleConfig" }
+      responses:
+        "200":
+          description: Updated schedule
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/ScheduleConfig" } }
+        "403": { $ref: "#/components/responses/Error" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: "API token, e.g. `Authorization: Bearer nuc_…`"
+
+  parameters:
+    IdPath:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer, format: int64, minimum: 0 }
+    Offset:
+      name: offset
+      in: query
+      required: false
+      schema: { type: integer, default: 0, minimum: 0 }
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema: { type: integer, default: 50, minimum: 1, maximum: 500 }
+
+  responses:
+    Error:
+      description: Error response
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+      required: [error]
+
+    Domain:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        model: { type: string, description: "Embedding model id pinned for the domain." }
+        dim: { type: integer, description: "Vector dimension produced by the model." }
+        created_at: { type: integer, format: int64, description: "Unix milliseconds." }
+      required: [id, name, model, dim, created_at]
+
+    Subdomain:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        domain_id: { type: integer, format: int64 }
+        name: { type: string }
+        description: { type: string }
+        created_at: { type: integer, format: int64 }
+      required: [id, domain_id, name, description, created_at]
+
+    Document:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        domain_id: { type: integer, format: int64 }
+        subdomain_id: { type: integer, format: int64, nullable: true }
+        title: { type: string }
+        source: { type: string, nullable: true }
+        metadata: { $ref: "#/components/schemas/StringMap" }
+        tags: { type: array, items: { type: integer, format: int64 } }
+        created_at: { type: integer, format: int64 }
+      required: [id, domain_id, title, metadata, tags, created_at]
+
+    Chunk:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        document_id: { type: integer, format: int64 }
+        domain_id: { type: integer, format: int64 }
+        subdomain_id: { type: integer, format: int64, nullable: true }
+        ordinal: { type: integer, description: "0-based position within the document." }
+        text: { type: string }
+        tags: { type: array, items: { type: integer, format: int64 } }
+        metadata: { $ref: "#/components/schemas/StringMap" }
+        prev: { type: integer, format: int64, nullable: true }
+        next: { type: integer, format: int64, nullable: true }
+      required: [id, document_id, domain_id, ordinal, text, tags, metadata]
+
+    Tag:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        domain_id: { type: integer, format: int64 }
+        name: { type: string }
+        display_name: { type: string }
+        description: { type: string }
+        parent: { type: integer, format: int64, nullable: true }
+        created_at: { type: integer, format: int64 }
+      required: [id, domain_id, name, display_name, description, created_at]
+
+    CreateDomainReq:
+      type: object
+      properties:
+        name: { type: string }
+        model: { type: string, nullable: true, description: "Defaults to the server's default model." }
+      required: [name]
+
+    IngestReq:
+      type: object
+      properties:
+        title: { type: string }
+        source: { type: string, nullable: true }
+        text: { type: string, nullable: true, description: "Raw text; the engine chunks it. Provide this or `chunks`." }
+        chunks: { type: array, nullable: true, items: { type: string }, description: "Pre-split chunks." }
+        subdomain: { type: string, nullable: true, description: "Subdomain name (created if missing)." }
+        labels: { type: array, items: { type: string }, description: "Label names (created if missing)." }
+        tags: { type: array, items: { type: integer, format: int64 }, description: "Existing tag ids (compat; prefer labels)." }
+        metadata: { $ref: "#/components/schemas/StringMap" }
+      required: [title]
+
+    IngestResp:
+      type: object
+      properties:
+        document_id: { type: integer, format: int64 }
+        job_id: { type: integer, format: int64, description: "0 when duplicate." }
+        duplicate: { type: boolean }
+      required: [document_id, job_id, duplicate]
+
+    UploadResp:
+      type: object
+      properties:
+        document_id: { type: integer, format: int64 }
+        job_id: { type: integer, format: int64, description: "0 when duplicate." }
+        chars: { type: integer, description: "Characters of text extracted." }
+        duplicate: { type: boolean }
+      required: [document_id, job_id, chars, duplicate]
+
+    SearchReq:
+      type: object
+      properties:
+        query: { type: string, nullable: true, description: "Text query. Provide this or `query_vector`." }
+        query_vector: { type: array, nullable: true, items: { type: number, format: float }, description: "Precomputed vector (must match domain dim)." }
+        k: { type: integer, default: 10, description: "Number of results (capped at 1000)." }
+        tags: { type: array, items: { type: integer, format: int64 } }
+        match_all: { type: boolean, default: false, description: "Require all `tags` instead of any." }
+        document_ids: { type: array, items: { type: integer, format: int64 } }
+        subdomain: { type: string, nullable: true, description: "Restrict to this subdomain (by name)." }
+        filter: { type: string, nullable: true, description: "Query-language filter, e.g. `tag:legal AND NOT tag:draft`." }
+
+    Hit:
+      type: object
+      properties:
+        chunk_id: { type: integer, format: int64 }
+        document_id: { type: integer, format: int64 }
+        score: { type: number, format: float, description: "Score of the last applied stage (RRF or rerank); scale is not portable." }
+        text: { type: string }
+        tags: { type: array, items: { type: integer, format: int64 } }
+        metadata: { $ref: "#/components/schemas/StringMap" }
+      required: [chunk_id, document_id, score, text, tags, metadata]
+
+    CreateTagReq:
+      type: object
+      properties:
+        name: { type: string }
+        display_name: { type: string, nullable: true }
+        description: { type: string }
+        parent: { type: integer, format: int64, nullable: true }
+      required: [name]
+
+    CreateSubdomainReq:
+      type: object
+      properties:
+        name: { type: string }
+        description: { type: string }
+      required: [name]
+
+    Job:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        status: { type: string, enum: [Pending, Running, Done, Failed] }
+        attempts: { type: integer }
+        error: { type: string, nullable: true }
+      required: [id, status, attempts]
+
+    CreateTokenReq:
+      type: object
+      properties:
+        name: { type: string }
+        scopes: { type: array, items: { $ref: "#/components/schemas/Scope" } }
+        expires_at: { type: integer, format: int64, nullable: true, description: "Unix milliseconds; null = never." }
+      required: [name, scopes]
+
+    CreateTokenResp:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        token: { type: string, description: "Plaintext token, shown only here." }
+      required: [id, name, token]
+
+    TokenInfo:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        scopes: { type: array, items: { $ref: "#/components/schemas/Scope" } }
+        created_at: { type: integer, format: int64 }
+        expires_at: { type: integer, format: int64, nullable: true }
+      required: [id, name, scopes, created_at]
+
+    PersistResp:
+      type: object
+      properties:
+        persisted: { type: integer }
+      required: [persisted]
+
+    BackupKind:
+      type: string
+      enum: [Full, Differential]
+
+    BackupReq:
+      type: object
+      properties:
+        kind:
+          type: string
+          enum: [full, differential]
+          default: full
+
+    BackupRecord:
+      type: object
+      properties:
+        id: { type: string, description: "Stable id / filename base, e.g. 2026-06-21_15-30-12-123-full." }
+        kind: { $ref: "#/components/schemas/BackupKind" }
+        created_at: { type: integer, format: int64, description: "Unix milliseconds." }
+        parent: { type: string, nullable: true, description: "For differentials, the full they apply on top of." }
+        file: { type: string }
+        bytes: { type: integer, format: int64 }
+      required: [id, kind, created_at, file, bytes]
+
+    RestoreReq:
+      type: object
+      properties:
+        id: { type: string, description: "Backup id to restore (full or differential)." }
+      required: [id]
+
+    RestoreResp:
+      type: object
+      properties:
+        restored: { type: string }
+        active_db: { type: string, description: "New live database file the engine was swapped onto." }
+      required: [restored, active_db]
+
+    ScheduleConfig:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        interval_secs: { type: integer, format: int64, description: "Seconds between scheduled backups." }
+        full_every: { type: integer, description: "Every Nth scheduled backup is a full; the rest differentials." }
+        keep_fulls: { type: integer, description: "Full backups (and their differentials) to retain." }
+      required: [enabled, interval_secs, full_every, keep_fulls]
+
+    Perm:
+      type: string
+      enum: [Read, Write, Admin]
+      description: "Permission level, ordered Read < Write < Admin."
+
+    DomainScope:
+      description: |
+        Which domain(s) a scope applies to. Either the string `"All"` or an
+        object `{ "One": <domain_id> }` (externally-tagged enum).
+      oneOf:
+        - type: string
+          enum: [All]
+        - type: object
+          properties:
+            One: { type: integer, format: int64 }
+          required: [One]
+
+    Scope:
+      type: object
+      properties:
+        domain: { $ref: "#/components/schemas/DomainScope" }
+        perm: { $ref: "#/components/schemas/Perm" }
+      required: [domain, perm]
+
+    StringMap:
+      type: object
+      additionalProperties: { type: string }
+      description: "String→string map (metadata)."

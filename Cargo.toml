@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/server"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/your-org/nucleus"
+rust-version = "1.82"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+redb = "2"
+bincode = { version = "2", features = ["serde"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+# Drop debuginfo in dev builds: on this project it more than halves the size of
+# `target/` (the dependency graph is large — ort/ONNX, tokenizers, image codecs),
+# which matters on constrained disks. Re-enable locally if you need a debugger.
+[profile.dev]
+debug = 0

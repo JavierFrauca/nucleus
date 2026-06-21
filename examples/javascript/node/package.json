@@ -1,0 +1,12 @@
+{
+  "name": "nucleus-node-demo",
+  "private": true,
+  "type": "module",
+  "description": "Demo headless del SDK de Nucleus en Node.",
+  "scripts": {
+    "start": "node demo.mjs"
+  },
+  "dependencies": {
+    "nucleus-client": "file:../../../clients/typescript"
+  }
+}

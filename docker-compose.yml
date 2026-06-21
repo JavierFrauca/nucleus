@@ -1,0 +1,36 @@
+# Nucleus server — single-node deployment.
+#
+#   docker compose up -d --build
+#   docker compose exec nucleus cat /data/admin_token.txt   # bootstrap admin token (once)
+#
+# Data (DB, model cache, indexes, admin token) lives in the named volume so it
+# survives restarts and rebuilds. The first search/ingest downloads the embedding
+# model (~450 MB) into the volume.
+
+services:
+  nucleus:
+    build: .
+    image: nucleus:0.1.0
+    ports:
+      - "8080:8080"
+    volumes:
+      - nucleus-data:/data
+    environment:
+      NUCLEUS_ADDR: "0.0.0.0:8080"
+      RUST_LOG: "nucleus_server=info,warn"
+      # Optional tuning:
+      # NUCLEUS_WORKERS: "2"
+      # NUCLEUS_INDEX: "hnsw"            # flat (default) | hnsw
+      # NUCLEUS_RERANK_MODEL: "bge-reranker-base"   # enable cross-encoder rerank
+      # NUCLEUS_RERANK_CANDIDATES: "20"
+      # NUCLEUS_CORS_ANY: "true"          # allow browser clients
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/readyz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+volumes:
+  nucleus-data:

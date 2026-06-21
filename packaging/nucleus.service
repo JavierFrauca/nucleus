@@ -1,0 +1,32 @@
+# systemd unit for nucleus-server.
+#   sudo useradd --system --home /var/lib/nucleus --create-home nucleus
+#   sudo mkdir -p /opt/nucleus && sudo cp nucleus-server libonnxruntime*.so* /opt/nucleus/
+#   sudo cp nucleus.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now nucleus
+#   sudo cat /var/lib/nucleus/admin_token.txt   # bootstrap admin token (once)
+[Unit]
+Description=Nucleus RAG database server
+After=network.target
+
+[Service]
+Type=simple
+User=nucleus
+Group=nucleus
+WorkingDirectory=/opt/nucleus
+# ort loads the ONNX Runtime shared library from here.
+Environment=LD_LIBRARY_PATH=/opt/nucleus
+Environment=NUCLEUS_ADDR=0.0.0.0:8080
+Environment=NUCLEUS_DB=/var/lib/nucleus/nucleus.redb
+Environment=NUCLEUS_MODEL_CACHE=/var/lib/nucleus/models
+Environment=NUCLEUS_INDEX_DIR=/var/lib/nucleus/indexes
+Environment=NUCLEUS_ADMIN_TOKEN_FILE=/var/lib/nucleus/admin_token.txt
+Environment=RUST_LOG=nucleus_server=info,warn
+ExecStart=/opt/nucleus/nucleus-server
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

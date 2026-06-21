@@ -1,0 +1,102 @@
+<svg viewBox="0 0 900 700" xmlns="http://www.w3.org/2000/svg" role="img" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">
+  <title>Arquitectura de Nucleus</title>
+  <desc>Clientes HTTP sobre nucleus-server (axum), que a través de un EngineHandle accede al Engine de nucleus-core (storage redb, embeddings ONNX, índices vectorial y BM25, reranking, jobs y backups), persistiendo en un único fichero redb.</desc>
+
+  <rect x="0" y="0" width="900" height="700" rx="14" fill="#ffffff" stroke="#e2e8f0"/>
+
+  <text x="32" y="42" font-size="24" font-weight="700" fill="#0f172a">Nucleus — Arquitectura</text>
+  <text x="32" y="64" font-size="13" fill="#64748b">Base de datos llave en mano para RAG · todo in-process · un solo binario</text>
+
+  <!-- legend -->
+  <rect x="690" y="30" width="14" height="14" rx="3" fill="#ccfbf1" stroke="#14b8a6"/>
+  <text x="710" y="42" font-size="12" fill="#475569">diferenciador (el foso)</text>
+
+  <!-- Clients -->
+  <g>
+    <rect x="90" y="86" width="220" height="44" rx="8" fill="#ffffff" stroke="#cbd5e1"/>
+    <text x="200" y="113" text-anchor="middle" font-size="14" font-weight="600" fill="#1e293b">SDK C# / .NET</text>
+    <rect x="340" y="86" width="220" height="44" rx="8" fill="#ffffff" stroke="#cbd5e1"/>
+    <text x="450" y="113" text-anchor="middle" font-size="14" font-weight="600" fill="#1e293b">SDK JS / TS</text>
+    <rect x="590" y="86" width="220" height="44" rx="8" fill="#ffffff" stroke="#cbd5e1"/>
+    <text x="700" y="113" text-anchor="middle" font-size="14" font-weight="600" fill="#1e293b">HTTP / curl</text>
+  </g>
+
+  <line x1="450" y1="130" x2="450" y2="150" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- Server -->
+  <rect x="90" y="150" width="720" height="60" rx="10" fill="#eff6ff" stroke="#3b82f6"/>
+  <text x="450" y="176" text-anchor="middle" font-size="15" font-weight="700" fill="#1e3a8a">nucleus-server (axum)</text>
+  <text x="450" y="196" text-anchor="middle" font-size="12" fill="#475569">rutas · auth por token · load-shed · scheduler de backups</text>
+
+  <line x1="450" y1="210" x2="450" y2="234" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="462" y="227" font-size="11" fill="#64748b" font-style="italic">EngineHandle (swap atómico en restore)</text>
+
+  <!-- Engine container -->
+  <rect x="60" y="234" width="780" height="218" rx="12" fill="#f8fafc" stroke="#94a3b8"/>
+  <text x="76" y="256" font-size="14" font-weight="700" fill="#334155">Engine — fachada síncrona (núcleo en spawn_blocking)</text>
+
+  <!-- Row A -->
+  <rect x="80" y="268" width="175" height="58" rx="8" fill="#ccfbf1" stroke="#14b8a6"/>
+  <text x="167" y="291" text-anchor="middle" font-size="13" font-weight="600" fill="#134e4a">Embeddings</text>
+  <text x="167" y="309" text-anchor="middle" font-size="11" fill="#475569">ONNX · e5-small</text>
+
+  <rect x="268" y="268" width="175" height="58" rx="8" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="355" y="291" text-anchor="middle" font-size="13" font-weight="600" fill="#1e293b">Índice vectorial</text>
+  <text x="355" y="309" text-anchor="middle" font-size="11" fill="#475569">flat / HNSW</text>
+
+  <rect x="456" y="268" width="175" height="58" rx="8" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="543" y="291" text-anchor="middle" font-size="13" font-weight="600" fill="#1e293b">Índice léxico</text>
+  <text x="543" y="309" text-anchor="middle" font-size="11" fill="#475569">BM25 → RRF híbrido</text>
+
+  <rect x="644" y="268" width="175" height="58" rx="8" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="731" y="291" text-anchor="middle" font-size="13" font-weight="600" fill="#1e293b">Reranking</text>
+  <text x="731" y="309" text-anchor="middle" font-size="11" fill="#475569">cross-encoder (opt.)</text>
+
+  <!-- Row B -->
+  <rect x="80" y="338" width="175" height="58" rx="8" fill="#ccfbf1" stroke="#14b8a6"/>
+  <text x="167" y="361" text-anchor="middle" font-size="13" font-weight="600" fill="#134e4a">Ingesta</text>
+  <text x="167" y="379" text-anchor="middle" font-size="11" fill="#475569">extract + chunk</text>
+
+  <rect x="268" y="338" width="175" height="58" rx="8" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="355" y="361" text-anchor="middle" font-size="13" font-weight="600" fill="#1e293b">JobQueue</text>
+  <text x="355" y="379" text-anchor="middle" font-size="11" fill="#475569">cola persistida</text>
+
+  <rect x="456" y="338" width="175" height="58" rx="8" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="543" y="361" text-anchor="middle" font-size="13" font-weight="600" fill="#1e293b">Backups</text>
+  <text x="543" y="379" text-anchor="middle" font-size="11" fill="#475569">full + delta bsdiff</text>
+
+  <rect x="644" y="338" width="175" height="58" rx="8" fill="#ffffff" stroke="#cbd5e1"/>
+  <text x="731" y="361" text-anchor="middle" font-size="13" font-weight="600" fill="#1e293b">Consulta + Auth</text>
+  <text x="731" y="379" text-anchor="middle" font-size="11" fill="#475569">DSL filtros · tokens</text>
+
+  <text x="76" y="430" font-size="11" fill="#64748b">Storage (redb + bincode): tablas + índices secundarios · transacción atómica por operación · dedupe por hash</text>
+
+  <line x1="450" y1="452" x2="450" y2="476" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- Persistence -->
+  <rect x="90" y="476" width="220" height="56" rx="8" fill="#f1f5f9" stroke="#475569"/>
+  <text x="200" y="500" text-anchor="middle" font-size="13" font-weight="700" fill="#0f172a">nucleus.redb</text>
+  <text x="200" y="518" text-anchor="middle" font-size="11" fill="#475569">fuente de verdad · ACID</text>
+
+  <rect x="340" y="476" width="220" height="56" rx="8" fill="#f1f5f9" stroke="#64748b"/>
+  <text x="450" y="500" text-anchor="middle" font-size="13" font-weight="700" fill="#0f172a">backups/</text>
+  <text x="450" y="518" text-anchor="middle" font-size="11" fill="#475569">full + diferenciales</text>
+
+  <rect x="590" y="476" width="220" height="56" rx="8" fill="#f1f5f9" stroke="#64748b"/>
+  <text x="700" y="500" text-anchor="middle" font-size="13" font-weight="700" fill="#0f172a">model cache</text>
+  <text x="700" y="518" text-anchor="middle" font-size="11" fill="#475569">regenerable</text>
+
+  <!-- Notes -->
+  <text x="32" y="566" font-size="12.5" fill="#0f172a" font-weight="600">Claves de diseño</text>
+  <text x="32" y="588" font-size="12" fill="#475569">• Embeddings dentro del motor → privacidad total / on-prem, sin servicio externo.</text>
+  <text x="32" y="608" font-size="12" fill="#475569">• Recuperación híbrida (vector + BM25) fusionada con RRF, reranking opcional.</text>
+  <text x="32" y="628" font-size="12" fill="#475569">• Índices en memoria, reconstruibles desde el .redb; restore en caliente (swap del motor).</text>
+  <text x="32" y="648" font-size="12" fill="#475569">• Motor síncrono envuelto en spawn_blocking; CPU-bound (~388 req/s, 12 hilos); RAM ~1 GB estable.</text>
+  <text x="32" y="668" font-size="12" fill="#475569">• Un workspace Rust (core + server), un binario autocontenido, ACID por transacción.</text>
+
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/>
+    </marker>
+  </defs>
+</svg>

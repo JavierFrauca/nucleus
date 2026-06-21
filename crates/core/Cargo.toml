@@ -1,0 +1,44 @@
+[package]
+name = "nucleus-core"
+description = "Core engine for Nucleus, a RAG-oriented database (domains, tagging, hybrid chunk retrieval, in-process embeddings)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/nucleus-core"
+keywords = ["rag", "embeddings", "vector-search", "database", "search"]
+categories = ["database-implementations", "text-processing"]
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+redb.workspace = true
+bincode.workspace = true
+fastembed = "4"
+hnsw_rs = "0.3"
+ouroboros = "0.18"
+sha2 = "0.10"
+rand = "0.9"
+parking_lot = "0.12"
+serde_json = "1"
+# Binary delta (bsdiff) for full-fidelity differential backups.
+qbsdiff = "1"
+# In-engine document text extraction (transparent multi-format ingestion).
+pdf-extract = "0.7"
+calamine = "0.26"
+html2text = "0.12"
+zip = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
+# Only pulled in (with a GPU execution provider) when the `gpu` feature is on.
+ort = { version = "=2.0.0-rc.9", default-features = false, optional = true }
+
+[features]
+default = []
+# Run embedding inference on the GPU via ONNX Runtime's DirectML provider
+# (Windows), falling back to CPU. Requires a compatible GPU/driver at runtime.
+gpu = ["dep:ort", "ort/directml", "ort/download-binaries"]
+
+[dev-dependencies]
+tempfile = "3"

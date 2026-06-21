@@ -1,0 +1,14 @@
+/target
+.git
+.github
+**/*.redb
+*.redb.lock
+nucleus_demo
+admin_token.txt
+nucleus_admin_token.txt
+# Build artifacts not needed to compile the Rust server
+/dist
+clients/typescript/node_modules
+clients/typescript/dist
+clients/csharp/**/bin
+clients/csharp/**/obj

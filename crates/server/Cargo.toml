@@ -1,0 +1,29 @@
+[package]
+name = "nucleus-server"
+description = "HTTP API server for the Nucleus RAG database engine."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "nucleus-server"
+path = "src/main.rs"
+
+[features]
+# Forward GPU inference support to nucleus-core.
+gpu = ["nucleus-core/gpu"]
+
+[dependencies]
+nucleus-core = { path = "../core" }
+tokio = { version = "1", features = ["full"] }
+axum = "0.8"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+serde = { workspace = true }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
