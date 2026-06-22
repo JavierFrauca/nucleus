@@ -15,6 +15,15 @@ Prioridad: P1 = siguiente, P3 = a futuro.
 
 ---
 
+## Eje 0 — Velocidad (single-node)
+
+| Estado | Prioridad | Ítem | Notas |
+|--------|-----------|------|-------|
+| ✅ | P1 | **Caché de embedding de query (LRU)** | El cuello medido es embeber la query en CPU; una LRU en memoria (con la inferencia **fuera del lock**) sirve consultas repetidas sin re-embeber. `NUCLEUS_QUERY_CACHE`, off por defecto. [`engine.rs`](../crates/core/src/engine.rs). |
+| ⬜ | P1 | **Caché de resultados** | Cachear hits por `(dominio, request)` invalidando con una "generación" por dominio en cada escritura. |
+| ⬜ | P2 | **Modelo precacheado en la imagen Docker** | Evitar la descarga de ~450 MB en el primer arranque. |
+| ⬜ | P2 | **GPU (CUDA) para embedding/rerank** | Rompe el techo de throughput (DirectML no ayudó; CUDA sí). |
+
 ## Eje 1 — Calidad de recuperación (el foso)
 
 | Estado | Prioridad | Ítem | Notas |

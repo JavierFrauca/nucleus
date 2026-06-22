@@ -83,6 +83,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    if cfg.query_cache_cap > 0 {
+        engine.set_query_cache(cfg.query_cache_cap);
+        tracing::info!("query-embedding cache: {} entries", cfg.query_cache_cap);
+    }
+
     // Swappable engine handle, shared by the job queue, handlers and restore.
     let handle = EngineHandle::new(engine);
     let queue = JobQueue::start(handle.clone(), cfg.workers, 3);
@@ -141,6 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         backups,
         embedder,
         index_kind: cfg.index_kind,
+        query_cache_cap: cfg.query_cache_cap,
         data_dir,
         schedule,
     };

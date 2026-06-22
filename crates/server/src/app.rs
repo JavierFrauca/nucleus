@@ -51,6 +51,8 @@ pub struct AppState {
     pub embedder: Arc<dyn Embedder>,
     /// Index backend for engines built on restore.
     pub index_kind: IndexKind,
+    /// Query-embedding cache capacity, re-applied to engines built on restore.
+    pub query_cache_cap: usize,
     /// Directory where restored database files and the active-db pointer live.
     pub data_dir: PathBuf,
     /// Runtime-adjustable backup schedule.
@@ -188,6 +190,8 @@ pub struct Config {
     pub embed_batch_window_ms: u64,
     /// Directory where backups (snapshots, deltas, catalog) are stored.
     pub backup_dir: PathBuf,
+    /// Query-embedding cache capacity (entries). `0` (default) disables it.
+    pub query_cache_cap: usize,
     /// Per-client request rate limit (req/s). `0` (default) disables limiting.
     pub rate_limit_rps: f64,
     /// Burst capacity for the rate limiter; defaults to `max(rps, 1)`.
@@ -275,6 +279,10 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(5),
+            query_cache_cap: env::var("NUCLEUS_QUERY_CACHE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
             rate_limit_rps: env::var("NUCLEUS_RATE_LIMIT_RPS")
                 .ok()
                 .and_then(|v| v.parse().ok())

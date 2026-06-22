@@ -3,10 +3,12 @@
 //! [`crate::jobs`]) drives `populate_document` on background workers.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::hash::Hash;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 
 use crate::auth::{self, ApiToken, AuthContext, Scope};
 use crate::chunking::{Chunker, FixedSizeChunker};
@@ -164,6 +166,60 @@ fn mmr_select(
     chosen.into_iter().filter_map(|i| slots[i].take()).collect()
 }
 
+/// A tiny bounded **LRU** cache. Recency is tracked with a monotonic tick;
+/// eviction scans for the smallest tick — O(n) but only on a miss-insert into a
+/// full cache, and `n` (the cap) is small relative to the cost of the work being
+/// cached (an embedding inference), so it never dominates.
+struct LruCache<K, V> {
+    cap: usize,
+    tick: u64,
+    map: HashMap<K, (V, u64)>,
+}
+
+impl<K: Eq + Hash + Clone, V: Clone> LruCache<K, V> {
+    fn new(cap: usize) -> Self {
+        Self {
+            cap: cap.max(1),
+            tick: 0,
+            map: HashMap::new(),
+        }
+    }
+
+    /// Fetch a clone of the value for `k`, bumping its recency.
+    fn get(&mut self, k: &K) -> Option<V> {
+        match self.map.get_mut(k) {
+            Some(entry) => {
+                self.tick += 1;
+                entry.1 = self.tick;
+                Some(entry.0.clone())
+            }
+            None => None,
+        }
+    }
+
+    /// Insert/replace `k`, evicting the least-recently-used entry if full.
+    fn put(&mut self, k: K, v: V) {
+        self.tick += 1;
+        let t = self.tick;
+        if !self.map.contains_key(&k) && self.map.len() >= self.cap {
+            if let Some(old) = self
+                .map
+                .iter()
+                .min_by_key(|(_, (_, t))| *t)
+                .map(|(k, _)| k.clone())
+            {
+                self.map.remove(&old);
+            }
+        }
+        self.map.insert(k, (v, t));
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.map.len()
+    }
+}
+
 /// The body of an ingest request: either raw text (the engine chunks it) or
 /// already-split chunks.
 pub enum IngestBody {
@@ -239,6 +295,11 @@ pub struct Engine {
     /// updating it on the auth hot path must not cost a disk write; it resets on
     /// restart.
     last_used: RwLock<HashMap<TokenId, i64>>,
+    /// Whether the query-embedding cache is on (checked lock-free on the hot path).
+    query_cache_on: AtomicBool,
+    /// LRU cache of query embeddings, keyed by `model\u{1f}text`. The expensive
+    /// inference runs **outside** this lock, so contention is microsecond-scale.
+    embed_cache: Mutex<Option<LruCache<String, Vec<f32>>>>,
 }
 
 /// A swappable holder for the live [`Engine`], so the engine can be replaced
@@ -302,6 +363,8 @@ impl Engine {
             reranker: RwLock::new(None),
             rerank_candidates: RwLock::new(DEFAULT_RERANK_CANDIDATES),
             last_used: RwLock::new(HashMap::new()),
+            query_cache_on: AtomicBool::new(false),
+            embed_cache: Mutex::new(None),
         };
         engine.load_all_indexes()?;
         Ok(engine)
@@ -321,6 +384,36 @@ impl Engine {
     /// Higher = better ordering but slower; clamped to at least 1.
     pub fn set_rerank_candidates(&self, n: usize) {
         *self.rerank_candidates.write() = n.max(1);
+    }
+
+    /// Enable (or resize) the query-embedding cache to hold up to `cap` entries.
+    /// `cap == 0` disables it. Embedding the same query text (e.g. popular or
+    /// repeated searches) then skips the CPU-bound inference, raising throughput.
+    pub fn set_query_cache(&self, cap: usize) {
+        if cap == 0 {
+            self.query_cache_on.store(false, Ordering::Relaxed);
+            *self.embed_cache.lock() = None;
+        } else {
+            *self.embed_cache.lock() = Some(LruCache::new(cap));
+            self.query_cache_on.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Embed a query, consulting the cache when enabled. The inference runs
+    /// outside the cache lock so concurrent misses don't serialise.
+    fn embed_query_cached(&self, model: &str, text: &str) -> Result<Vec<f32>> {
+        if !self.query_cache_on.load(Ordering::Relaxed) {
+            return self.embedder.embed_query(model, text);
+        }
+        let key = format!("{model}\u{1f}{text}");
+        if let Some(v) = self.embed_cache.lock().as_mut().and_then(|c| c.get(&key)) {
+            return Ok(v);
+        }
+        let v = self.embedder.embed_query(model, text)?;
+        if let Some(c) = self.embed_cache.lock().as_mut() {
+            c.put(key, v.clone());
+        }
+        Ok(v)
     }
 
     fn load_all_indexes(&self) -> Result<()> {
@@ -786,9 +879,7 @@ impl Engine {
                 }
                 (v, None)
             }
-            QueryInput::Text(text) => {
-                (self.embedder.embed_query(&domain.model, &text)?, Some(text))
-            }
+            QueryInput::Text(text) => (self.embed_query_cached(&domain.model, &text)?, Some(text)),
             QueryInput::Hybrid { text, vector } => {
                 if vector.len() != domain.dim {
                     return Err(NucleusError::DimensionMismatch {
@@ -944,7 +1035,7 @@ impl Engine {
         // Materialise the query once (embed any text query a single time).
         let (text, vector) = match query {
             QueryInput::Text(t) => {
-                let v = self.embedder.embed_query(&model, &t)?;
+                let v = self.embed_query_cached(&model, &t)?;
                 (Some(t), v)
             }
             QueryInput::Vector(v) => (None, v),
@@ -1712,6 +1803,98 @@ mod tests {
             matches!(e.authenticate(&plain), Err(NucleusError::Unauthorized)),
             "old secret is rejected"
         );
+    }
+
+    #[test]
+    fn lru_cache_evicts_least_recently_used() {
+        let mut c: LruCache<&str, i32> = LruCache::new(2);
+        c.put("a", 1);
+        c.put("b", 2);
+        assert_eq!(c.get(&"a"), Some(1)); // touch "a" so "b" is now LRU
+        c.put("c", 3); // evicts "b"
+        assert_eq!(c.get(&"b"), None);
+        assert_eq!(c.get(&"a"), Some(1));
+        assert_eq!(c.get(&"c"), Some(3));
+        assert_eq!(c.len(), 2);
+    }
+
+    /// Wraps an embedder counting how many query embeddings it computes.
+    struct CountingEmbedder {
+        inner: MockEmbedder,
+        queries: std::sync::atomic::AtomicUsize,
+    }
+    impl Embedder for CountingEmbedder {
+        fn dim(&self, model: &str) -> Option<usize> {
+            self.inner.dim(model)
+        }
+        fn embed_documents(&self, model: &str, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            self.inner.embed_documents(model, texts)
+        }
+        fn embed_query(&self, model: &str, text: &str) -> Result<Vec<f32>> {
+            self.queries.fetch_add(1, Ordering::Relaxed);
+            self.inner.embed_query(model, text)
+        }
+    }
+
+    #[test]
+    fn query_cache_skips_repeated_embedding() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path().join("n.redb")).unwrap();
+        let emb = Arc::new(CountingEmbedder {
+            inner: MockEmbedder::new(64),
+            queries: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let e = Engine::new(storage, emb.clone()).unwrap();
+        e.set_query_cache(16);
+        let dom = e.create_domain("docs", None).unwrap();
+        e.ingest_document(
+            dom.id,
+            "d",
+            None,
+            BTreeMap::new(),
+            vec![],
+            IngestBody::Chunks(vec!["contrato laboral".into()]),
+        )
+        .unwrap();
+
+        let run = || {
+            e.search(
+                dom.id,
+                SearchRequest {
+                    query: QueryInput::Text("contrato".into()),
+                    k: 1,
+                    tags: vec![],
+                    match_all: false,
+                    document_ids: vec![],
+                    subdomain: None,
+                    filter: None,
+                    diversity: 0.0,
+                },
+            )
+            .unwrap()
+        };
+        // Three identical text queries → the embedding is computed once.
+        run();
+        run();
+        run();
+        assert_eq!(emb.queries.load(Ordering::Relaxed), 1);
+
+        // A different query is a miss (computed once more).
+        e.search(
+            dom.id,
+            SearchRequest {
+                query: QueryInput::Text("laboral".into()),
+                k: 1,
+                tags: vec![],
+                match_all: false,
+                document_ids: vec![],
+                subdomain: None,
+                filter: None,
+                diversity: 0.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(emb.queries.load(Ordering::Relaxed), 2);
     }
 
     #[test]

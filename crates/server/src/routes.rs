@@ -1370,9 +1370,14 @@ async fn restore_backup(
     let kind = st.index_kind;
     let index_dir = st.data_dir.join(format!("indexes-restored-{ts}"));
     let db_for_open = new_db.clone();
+    let cache_cap = st.query_cache_cap;
     let new_engine = blocking(move || {
         let storage = Storage::open(&db_for_open)?;
-        Engine::open(storage, embedder, kind, Some(index_dir))
+        let engine = Engine::open(storage, embedder, kind, Some(index_dir))?;
+        if cache_cap > 0 {
+            engine.set_query_cache(cache_cap);
+        }
+        Ok(engine)
     })
     .await?;
     st.engine.swap(std::sync::Arc::new(new_engine));
@@ -1467,6 +1472,7 @@ mod tests {
             backups,
             embedder,
             index_kind: nucleus_core::index::IndexKind::Flat,
+            query_cache_cap: 0,
             data_dir: dir.path().to_path_buf(),
             schedule: std::sync::Arc::new(std::sync::RwLock::new(crate::app::ScheduleConfig {
                 enabled: false,
