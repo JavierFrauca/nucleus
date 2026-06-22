@@ -20,8 +20,8 @@ Prioridad: P1 = siguiente, P3 = a futuro.
 | Estado | Prioridad | Ítem | Notas |
 |--------|-----------|------|-------|
 | ✅ | P1 | **Caché de embedding de query (LRU)** | El cuello medido es embeber la query en CPU; una LRU en memoria (con la inferencia **fuera del lock**) sirve consultas repetidas sin re-embeber. `NUCLEUS_QUERY_CACHE`, off por defecto. [`engine.rs`](../crates/core/src/engine.rs). |
-| ⬜ | P1 | **Caché de resultados** | Cachear hits por `(dominio, request)` invalidando con una "generación" por dominio en cada escritura. |
-| ⬜ | P2 | **Modelo precacheado en la imagen Docker** | Evitar la descarga de ~450 MB en el primer arranque. |
+| ⬜ | P3 | **Caché de resultados** | Cachear hits por `(dominio, request)` invalidando con una "generación" por dominio en cada escritura. **Baja prioridad ahora**: la medición propia dice que el cuello es el *embedding* (ya cacheado), no la fusión/BM25; este caché solo añade valor con **reranking** activo (caro) y trae riesgo de staleness. |
+| ✅ | P2 | **Modelo precacheado en la imagen Docker** | El build descarga el modelo por defecto y lo hornea en la imagen (`PREFETCH_MODEL=true`); el primer arranque no descarga 450 MB. [`Dockerfile`](../Dockerfile), [`prefetch_model.rs`](../crates/core/examples/prefetch_model.rs). |
 | ⬜ | P2 | **GPU (CUDA) para embedding/rerank** | Rompe el techo de throughput (DirectML no ayudó; CUDA sí). |
 
 ## Eje 1 — Calidad de recuperación (el foso)

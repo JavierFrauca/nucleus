@@ -135,8 +135,10 @@ Al primer arranque, si no hay tokens, se imprime **una sola vez** un token admin
 ```
 
 > La primera ingesta/búsqueda **descarga el modelo** de HuggingFace
-> (`multilingual-e5-small`, ~450 MB) y lo cachea. Requiere red e espacio en disco esa
-> primera vez.
+> (`multilingual-e5-small`, ~450 MB) y lo cachea. Requiere red y espacio en disco esa
+> primera vez. **La imagen Docker ya trae el modelo precacheado** (build con
+> `PREFETCH_MODEL=true`, por defecto), así que el primer arranque no descarga nada;
+> usa `--build-arg PREFETCH_MODEL=false` para builds sin red.
 
 ## API
 
