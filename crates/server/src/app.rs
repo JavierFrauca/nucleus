@@ -47,6 +47,8 @@ pub struct AppState {
     pub batcher: Option<Arc<EmbedBatcher>>,
     /// Backup catalog + snapshot/restore operations.
     pub backups: Arc<BackupManager>,
+    /// Optional off-site upload command run after each backup (see `backup_sink`).
+    pub backup_upload_cmd: Option<String>,
     /// Embedder used to build a fresh engine on restore.
     pub embedder: Arc<dyn Embedder>,
     /// Index backend for engines built on restore.
@@ -190,6 +192,9 @@ pub struct Config {
     pub embed_batch_window_ms: u64,
     /// Directory where backups (snapshots, deltas, catalog) are stored.
     pub backup_dir: PathBuf,
+    /// Optional command to upload each backup file off-site (e.g. `aws s3 cp {}
+    /// s3://bucket/`). `{}` is replaced by the file path. `None` disables it.
+    pub backup_upload_cmd: Option<String>,
     /// Query-embedding cache capacity (entries). `0` (default) disables it.
     pub query_cache_cap: usize,
     /// Per-client request rate limit (req/s). `0` (default) disables limiting.
@@ -307,6 +312,9 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .filter(|&n: &usize| n > 0)
                 .unwrap_or(7),
+            backup_upload_cmd: env::var("NUCLEUS_BACKUP_UPLOAD_CMD")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
             backup_dir,
             index_dir,
         }

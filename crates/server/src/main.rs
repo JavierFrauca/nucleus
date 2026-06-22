@@ -2,6 +2,7 @@
 //! the job queue, then serves the REST API.
 
 mod app;
+mod backup_sink;
 mod ratelimit;
 mod routes;
 
@@ -111,7 +112,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         full_every: cfg.backup_full_every,
         keep_fulls: cfg.backup_keep_fulls,
     }));
-    start_backup_scheduler(handle.clone(), backups.clone(), schedule.clone());
+    start_backup_scheduler(
+        handle.clone(),
+        backups.clone(),
+        schedule.clone(),
+        cfg.backup_upload_cmd.clone(),
+    );
 
     tracing::info!(
         "search concurrency limit: {} (wait {} ms); embed batching: {}",
@@ -147,6 +153,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         embedder,
         index_kind: cfg.index_kind,
         query_cache_cap: cfg.query_cache_cap,
+        backup_upload_cmd: cfg.backup_upload_cmd.clone(),
         data_dir,
         schedule,
     };
@@ -202,6 +209,7 @@ fn start_backup_scheduler(
     handle: Arc<EngineHandle>,
     backups: Arc<BackupManager>,
     schedule: Arc<RwLock<ScheduleConfig>>,
+    upload_cmd: Option<String>,
 ) {
     tokio::spawn(async move {
         let mut count: u64 = 0;
@@ -243,7 +251,21 @@ fn start_backup_scheduler(
             })
             .await;
             match res {
-                Ok(Ok(rec)) => tracing::info!("scheduled backup {} ({:?})", rec.id, rec.kind),
+                Ok(Ok(rec)) => {
+                    tracing::info!("scheduled backup {} ({:?})", rec.id, rec.kind);
+                    // Best-effort off-site upload; a failure must not stop scheduling.
+                    if let Some(cmd) = &upload_cmd {
+                        let file = backups.file_path(&rec);
+                        let cmd = cmd.clone();
+                        match tokio::task::spawn_blocking(move || backup_sink::upload(&cmd, &file))
+                            .await
+                        {
+                            Ok(Ok(())) => tracing::info!("uploaded backup {}", rec.id),
+                            Ok(Err(e)) => tracing::error!("backup upload failed: {e}"),
+                            Err(e) => tracing::error!("backup upload task panicked: {e}"),
+                        }
+                    }
+                }
                 Ok(Err(e)) => tracing::error!("scheduled backup failed: {e}"),
                 Err(e) => tracing::error!("scheduled backup task panicked: {e}"),
             }

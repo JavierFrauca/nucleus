@@ -66,6 +66,11 @@ impl BackupManager {
         self.dir.join("catalog.json")
     }
 
+    /// Absolute path of a backup's file on disk (for an upload sink).
+    pub fn file_path(&self, rec: &BackupRecord) -> PathBuf {
+        self.dir.join(&rec.file)
+    }
+
     /// All backups, oldest first.
     pub fn list(&self) -> Result<Vec<BackupRecord>> {
         let p = self.catalog_path();

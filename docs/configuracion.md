@@ -27,6 +27,7 @@ valores por defecto razonables.
 | `NUCLEUS_BACKUP_INTERVAL` | (vacío → desactivado) | Cadencia de copias programadas: `30m`, `6h`, `1d`, `2w` o segundos. |
 | `NUCLEUS_BACKUP_FULL_EVERY` | `7` | Cada cuántas copias programadas se hace una **full** (el resto, diferenciales). |
 | `NUCLEUS_BACKUP_KEEP` | `7` | Cuántas copias full (con sus diferenciales) se conservan; el resto se purgan. |
+| `NUCLEUS_BACKUP_UPLOAD_CMD` | (vacío → desactivado) | Comando que sube cada backup **off-site** (S3, etc.) tras crearlo. `{}` se sustituye por la ruta del fichero (si no aparece, se añade al final). Ej.: `aws s3 cp {} s3://bucket/nucleus/`, `rclone copy {} remote:nucleus`. Best-effort: un fallo se registra pero no rompe el backup. |
 | `RUST_LOG` | `info` | Nivel de logs (`tracing`). Ej.: `nucleus_server=info,warn`. |
 
 ## Ejemplos

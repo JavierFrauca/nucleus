@@ -1313,7 +1313,27 @@ async fn create_backup(
         Ok(rec)
     })
     .await?;
+    // Best-effort off-site upload (e.g. to S3) if configured.
+    if let Some(cmd) = &st.backup_upload_cmd {
+        let file = st.backups.file_path(&rec);
+        let cmd = cmd.clone();
+        if let Ok(Err(e)) = blocking_io(move || crate::backup_sink::upload(&cmd, &file)).await {
+            tracing::error!("backup upload failed: {e}");
+        }
+    }
     Ok(Json(rec))
+}
+
+/// Run a blocking closure on the blocking pool (for non-engine work like an
+/// upload subprocess), returning its `Result` and mapping a join failure.
+async fn blocking_io<T, F>(f: F) -> Result<T, ApiError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| ApiError(NucleusError::embedding_msg(format!("task failed: {e}"))))
 }
 
 /// List the backup catalog (admin).
@@ -1477,6 +1497,7 @@ mod tests {
                 std::time::Duration::from_millis(5),
             ))),
             backups,
+            backup_upload_cmd: None,
             embedder,
             index_kind: nucleus_core::index::IndexKind::Flat,
             query_cache_cap: 0,
