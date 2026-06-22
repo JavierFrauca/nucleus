@@ -9,7 +9,7 @@ valores por defecto razonables.
 | `NUCLEUS_ADDR` | `127.0.0.1:8080` | Dirección y puerto de escucha HTTP. |
 | `NUCLEUS_WORKERS` | `2` | Nº de workers que procesan jobs de ingesta en paralelo. |
 | `NUCLEUS_MODEL_CACHE` | (caché de fastembed) | Directorio donde se descargan/cachean los modelos de embeddings. Conviene fijarlo a una ruta persistente. |
-| `NUCLEUS_INDEX` | `flat` | Backend del índice vectorial: `flat` (exacto) o `hnsw` (aproximado, persistente). |
+| `NUCLEUS_INDEX` | `flat` | Backend del índice vectorial: `flat` (exacto), `sq` (exacto con cuantización escalar int8 → ~4× menos RAM) o `hnsw` (aproximado, persistente). |
 | `NUCLEUS_INDEX_DIR` | `<dir de NUCLEUS_DB>/nucleus_indexes` | Dónde se vuelca/carga el grafo HNSW. |
 | `NUCLEUS_GPU` | `false` | `true` para usar GPU en la inferencia. **Solo efectivo si el binario se compiló con `--features gpu`**; si no, se ignora (CPU). |
 | `NUCLEUS_ADMIN_TOKEN_FILE` | `<dir BD>/nucleus_admin_token.txt` | Fichero donde se escribe el token admin inicial (no se vuelca a logs). |

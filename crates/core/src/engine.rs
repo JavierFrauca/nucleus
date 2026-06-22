@@ -1940,6 +1940,45 @@ mod tests {
     }
 
     #[test]
+    fn search_with_scalar_quantized_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path().join("n.redb")).unwrap();
+        let e = Engine::with_index_kind(
+            storage,
+            Arc::new(MockEmbedder::new(64)),
+            crate::index::IndexKind::Sq,
+        )
+        .unwrap();
+        let dom = e.create_domain("docs", None).unwrap();
+        e.ingest_document(
+            dom.id,
+            "d",
+            None,
+            BTreeMap::new(),
+            vec![],
+            IngestBody::Chunks(vec!["el contrato laboral".into(), "pizza con piña".into()]),
+        )
+        .unwrap();
+        let hits = e
+            .search(
+                dom.id,
+                SearchRequest {
+                    query: QueryInput::Text("contrato".into()),
+                    k: 1,
+                    tags: vec![],
+                    match_all: false,
+                    document_ids: vec![],
+                    subdomain: None,
+                    filter: None,
+                    diversity: 0.0,
+                },
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].chunk.text.contains("contrato"));
+    }
+
+    #[test]
     fn search_with_hnsw_backend() {
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::open(dir.path().join("n.redb")).unwrap();

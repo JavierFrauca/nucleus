@@ -51,7 +51,7 @@ Prioridad: P1 = siguiente, P3 = a futuro.
 | Estado | Prioridad | Ítem | Notas |
 |--------|-----------|------|-------|
 | ⬜ | P2 | **mmap del grafo HNSW** | El grafo ya se persiste/recarga por fichero; el mmap puro depende de soporte en `hnsw_rs`. Ver "Diferidos". |
-| ⬜ | P2 | **Cuantización de vectores (PQ / scalar)** | Índice nuevo; ver "Diferidos". |
+| ✅ | P2 | **Cuantización escalar (int8)** | `NUCLEUS_INDEX=sq`: índice exacto-recall con codes int8 → **~4× menos RAM** que `flat`, error de cuantización despreciable. [`sq.rs`](../crates/core/src/index/sq.rs). **PQ** (product quantization, codebooks) queda como paso siguiente para ratios mayores. |
 | ⬜ | P3 | **Persistencia incremental del índice** | Hoy se vuelca entero. |
 | 🔭 | P3 | **Workers distribuidos / multi-nodo** | redb es single-writer; es otro producto. Ver "Diferidos". |
 
