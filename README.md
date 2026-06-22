@@ -107,7 +107,8 @@ crates/
 cargo build            # workspace
 cargo test --workspace # 37 tests (core + e2e HTTP con MockEmbedder)
 cargo clippy --workspace --all-targets
-cargo build --features gpu  # opcional: inferencia por GPU (ONNX DirectML)
+cargo build --features gpu   # opcional: inferencia por GPU (ONNX DirectML, Windows)
+cargo build --features cuda  # opcional: inferencia por GPU NVIDIA (ONNX CUDA)
 
 # Docker (multi-stage; ver Dockerfile)
 docker build -t nucleus .

@@ -12,6 +12,8 @@ path = "src/main.rs"
 [features]
 # Forward GPU inference support to nucleus-core.
 gpu = ["nucleus-core/gpu"]
+# Forward NVIDIA CUDA inference support to nucleus-core.
+cuda = ["nucleus-core/cuda"]
 
 [dependencies]
 nucleus-core = { path = "../core" }
