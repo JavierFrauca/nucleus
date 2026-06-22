@@ -125,8 +125,14 @@ impl JobQueue {
         body: JobBody,
     ) -> Result<(Document, JobId)> {
         let engine = self.handle.current();
-        let doc =
-            engine.create_document_record(domain_id, subdomain_id, title, source, metadata, tags)?;
+        let doc = engine.create_document_record(
+            domain_id,
+            subdomain_id,
+            title,
+            source,
+            metadata,
+            tags,
+        )?;
         let job = engine.storage().create_job(JobKind::Ingest {
             document_id: doc.id,
             body,
@@ -251,6 +257,7 @@ mod tests {
                     document_ids: vec![],
                     subdomain: None,
                     filter: None,
+                    diversity: 0.0,
                 },
             )
             .unwrap();

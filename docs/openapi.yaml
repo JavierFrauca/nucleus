@@ -115,6 +115,31 @@ paths:
             application/json: { schema: { $ref: "#/components/schemas/Domain" } }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+    patch:
+      tags: [domains]
+      summary: Rename a domain (admin)
+      parameters: [{ $ref: "#/components/parameters/IdPath" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RenameDomainReq" }
+      responses:
+        "200":
+          description: Updated domain
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/Domain" } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [domains]
+      summary: Delete a domain and everything under it (admin, cascade)
+      parameters: [{ $ref: "#/components/parameters/IdPath" }]
+      responses:
+        "204": { description: Deleted }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
 
   /v1/domains/{id}/documents:
     post:
@@ -189,6 +214,8 @@ paths:
         Provide `query` (text, embedded with the domain model) or `query_vector`
         (precomputed). Filters (`tags`, `document_ids`, `subdomain`, `filter`)
         are intersected. An unknown `subdomain` name yields an empty result.
+        Set `diversity` in (0, 1] to re-rank results with Maximal Marginal
+        Relevance, trading some relevance for less redundancy.
       parameters: [{ $ref: "#/components/parameters/IdPath" }]
       requestBody:
         required: true
@@ -232,6 +259,36 @@ paths:
               schema: { type: array, items: { $ref: "#/components/schemas/Tag" } }
         "403": { $ref: "#/components/responses/Error" }
 
+  /v1/domains/{id}/tags/{tag_id}:
+    patch:
+      tags: [tags]
+      summary: Update a tag's display name / description
+      parameters:
+        - { $ref: "#/components/parameters/IdPath" }
+        - { name: tag_id, in: path, required: true, schema: { type: integer, format: int64 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateTagReq" }
+      responses:
+        "200":
+          description: Updated tag
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/Tag" } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [tags]
+      summary: Delete a tag, detaching it from chunks/documents
+      parameters:
+        - { $ref: "#/components/parameters/IdPath" }
+        - { name: tag_id, in: path, required: true, schema: { type: integer, format: int64 } }
+      responses:
+        "204": { description: Deleted }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
   /v1/domains/{id}/subdomains:
     post:
       tags: [subdomains]
@@ -259,6 +316,18 @@ paths:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/Subdomain" } }
         "403": { $ref: "#/components/responses/Error" }
+
+  /v1/domains/{id}/subdomains/{sub_id}:
+    delete:
+      tags: [subdomains]
+      summary: Delete a subdomain, cascade-deleting its documents
+      parameters:
+        - { $ref: "#/components/parameters/IdPath" }
+        - { name: sub_id, in: path, required: true, schema: { type: integer, format: int64 } }
+      responses:
+        "204": { description: Deleted }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
 
   /v1/documents/{id}:
     get:
@@ -604,6 +673,7 @@ components:
         document_ids: { type: array, items: { type: integer, format: int64 } }
         subdomain: { type: string, nullable: true, description: "Restrict to this subdomain (by name)." }
         filter: { type: string, nullable: true, description: "Query-language filter, e.g. `tag:legal AND NOT tag:draft`." }
+        diversity: { type: number, format: float, default: 0, minimum: 0, maximum: 1, description: "Result diversity (MMR). 0 = pure relevance; higher reduces redundancy." }
 
     Hit:
       type: object
@@ -623,6 +693,19 @@ components:
         display_name: { type: string, nullable: true }
         description: { type: string }
         parent: { type: integer, format: int64, nullable: true }
+      required: [name]
+
+    UpdateTagReq:
+      type: object
+      description: "All fields optional; omitted ones are left unchanged. `name` is immutable (it is the lookup key)."
+      properties:
+        display_name: { type: string, nullable: true }
+        description: { type: string, nullable: true }
+
+    RenameDomainReq:
+      type: object
+      properties:
+        name: { type: string }
       required: [name]
 
     CreateSubdomainReq:

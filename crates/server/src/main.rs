@@ -2,6 +2,7 @@
 //! the job queue, then serves the REST API.
 
 mod app;
+mod ratelimit;
 mod routes;
 
 use std::path::PathBuf;
@@ -144,16 +145,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         schedule,
     };
 
-    let mut app = routes::router(state);
+    // Optional per-client rate limiter (off unless NUCLEUS_RATE_LIMIT_RPS > 0).
+    let rate_limiter = if cfg.rate_limit_rps > 0.0 {
+        let burst = if cfg.rate_limit_burst >= 1.0 {
+            cfg.rate_limit_burst
+        } else {
+            cfg.rate_limit_rps.max(1.0)
+        };
+        tracing::info!(
+            "rate limiting: {} req/s per client (burst {})",
+            cfg.rate_limit_rps,
+            burst
+        );
+        Some(Arc::new(ratelimit::RateLimiter::new(
+            cfg.rate_limit_rps,
+            burst,
+        )))
+    } else {
+        None
+    };
+
+    let mut app = routes::router(state, rate_limiter);
     if cfg.cors_any {
         app = app.layer(tower_http::cors::CorsLayer::permissive());
     }
 
     let listener = tokio::net::TcpListener::bind(&cfg.addr).await?;
     tracing::info!("Nucleus listening on http://{}", cfg.addr);
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(handle_for_shutdown))
-        .await?;
+    // Connect-info makes the client IP available to the rate limiter.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal(handle_for_shutdown))
+    .await?;
     Ok(())
 }
 
@@ -177,7 +202,12 @@ fn start_backup_scheduler(
         loop {
             let (enabled, interval, full_every, keep) = {
                 let s = schedule.read().unwrap();
-                (s.enabled, s.interval_secs, s.full_every.max(1), s.keep_fulls)
+                (
+                    s.enabled,
+                    s.interval_secs,
+                    s.full_every.max(1),
+                    s.keep_fulls,
+                )
             };
             if !enabled || interval == 0 {
                 // Disabled: re-check periodically (the schedule may be enabled later).

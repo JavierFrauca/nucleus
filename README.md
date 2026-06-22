@@ -148,12 +148,17 @@ Todas las rutas (salvo `/healthz`) requieren `Authorization: Bearer <token>`.
 | `POST /v1/domains`                     | Admin    | Crear dominio                        |
 | `GET /v1/domains`                      | auth     | Listar dominios                      |
 | `GET /v1/domains/{id}`                 | Read     | Obtener dominio                      |
+| `PATCH /v1/domains/{id}`               | Admin    | Renombrar dominio                    |
+| `DELETE /v1/domains/{id}`              | Admin    | Borrar dominio (cascada total)       |
 | `POST /v1/domains/{id}/documents`      | Write    | Ingestar documento (asíncrono)       |
-| `POST /v1/domains/{id}/search`         | Read     | **Buscar chunks**                    |
+| `POST /v1/domains/{id}/search`         | Read     | **Buscar chunks** (`diversity` opc.) |
 | `POST /v1/domains/{id}/tags`           | Write    | Crear etiqueta (label)               |
 | `GET /v1/domains/{id}/tags`            | Read     | Listar etiquetas                     |
+| `PATCH /v1/domains/{id}/tags/{tag}`    | Write    | Editar etiqueta (display/desc)       |
+| `DELETE /v1/domains/{id}/tags/{tag}`   | Write    | Borrar etiqueta (la desasocia)       |
 | `POST /v1/domains/{id}/subdomains`     | Write    | Crear subdominio                     |
 | `GET /v1/domains/{id}/subdomains`      | Read     | Listar subdominios                   |
+| `DELETE /v1/domains/{id}/subdomains/{sub}` | Write | Borrar subdominio (cascada docs)    |
 | `GET /v1/documents/{id}`               | Read     | Obtener documento                    |
 | `DELETE /v1/documents/{id}`            | Write    | Borrar documento + chunks            |
 | `GET /v1/chunks/{id}`                  | Read     | Obtener un chunk                     |
@@ -317,6 +322,12 @@ Dockerfile y CI.
 
 ## Próximos pasos
 
-- **Calidad (foso)**: **auto-inducción** de subdominios/labels (clustering + reglas, sin LLM).
-- **Operación**: borrado en cascada de dominios/subdominios/labels; rate limiting.
-- **Escala**: mmap del grafo HNSW; workers de jobs distribuidos; multi-nodo si SaaS.
+El roadmap completo —priorizado por ejes (calidad, operación, escala, API,
+ingesta) y con el estado de cada ítem— vive en su propio documento:
+**[docs/roadmap.md](docs/roadmap.md)**.
+
+Ya implementado en la última iteración: **chunking por frontera de frase**,
+**diversidad de resultados (MMR)**, **borrado en cascada** y updates
+(dominios/subdominios/labels), y **rate limiting** configurable. Lo siguiente en
+la lista: snippets/highlighting, pre-filtrado en HNSW, reindexado con cambio de
+modelo y observabilidad (trazas + histogramas).

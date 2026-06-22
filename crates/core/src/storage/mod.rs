@@ -605,6 +605,248 @@ impl Storage {
         Ok(removed)
     }
 
+    /// Rename a domain. Returns the updated record.
+    pub fn rename_domain(&self, id: DomainId, name: &str) -> Result<Domain> {
+        let wtx = self.db.begin_write()?;
+        let updated = {
+            let mut t = wtx.open_table(DOMAINS)?;
+            let bytes = t
+                .get(id.get())?
+                .map(|g| g.value().to_vec())
+                .ok_or(NucleusError::DomainNotFound(id))?;
+            let mut domain: Domain = codec::decode(&bytes)?;
+            domain.name = name.to_string();
+            t.insert(id.get(), codec::encode(&domain)?.as_slice())?;
+            domain
+        };
+        wtx.commit()?;
+        Ok(updated)
+    }
+
+    /// Delete a domain and **everything** under it: its documents, chunks,
+    /// embeddings, tags, subdomains and every secondary-index entry, plus the
+    /// by-name and content-hash lookups scoped to the domain. Returns the chunk
+    /// ids removed so the caller can drop the in-memory indexes (though the
+    /// engine usually just discards the whole per-domain index). All in one
+    /// transaction, so a crash leaves the domain either wholly present or wholly
+    /// gone.
+    pub fn delete_domain(&self, id: DomainId) -> Result<Vec<ChunkId>> {
+        let did = id.get();
+        let wtx = self.db.begin_write()?;
+        let mut removed = Vec::new();
+        {
+            // Fail fast if the domain doesn't exist (aborts the txn on return).
+            {
+                let domains = wtx.open_table(DOMAINS)?;
+                if domains.get(did)?.is_none() {
+                    return Err(NucleusError::DomainNotFound(id));
+                }
+            }
+            // Collect child ids up front (each helper call drops its read handle
+            // before we reopen the table for mutation in this same transaction).
+            let chunk_ids = collect_multimap(&wtx, CHUNKS_BY_DOMAIN, did)?;
+            let doc_ids = collect_multimap(&wtx, DOCS_BY_DOMAIN, did)?;
+            let tag_ids = collect_multimap(&wtx, TAGS_BY_DOMAIN, did)?;
+            let sub_ids = collect_multimap(&wtx, SUBDOMAINS_BY_DOMAIN, did)?;
+
+            // Chunks + embeddings + their secondary-index entries.
+            {
+                let mut chunks = wtx.open_table(CHUNKS)?;
+                let mut embeddings = wtx.open_table(EMBEDDINGS)?;
+                let mut by_tag = wtx.open_multimap_table(CHUNKS_BY_TAG)?;
+                let mut by_meta = wtx.open_multimap_table(CHUNKS_BY_META)?;
+                let mut by_sub = wtx.open_multimap_table(CHUNKS_BY_SUBDOMAIN)?;
+                let mut by_doc = wtx.open_multimap_table(CHUNKS_BY_DOC)?;
+                for cid in &chunk_ids {
+                    if let Some(cb) = chunks.get(*cid)? {
+                        let chunk: Chunk = codec::decode(cb.value())?;
+                        for tag in &chunk.tags {
+                            by_tag.remove(tag.get(), *cid)?;
+                        }
+                        for (k, v) in &chunk.metadata {
+                            by_meta.remove(meta_key(k, v).as_str(), *cid)?;
+                        }
+                        if let Some(sid) = chunk.subdomain_id {
+                            by_sub.remove(sid.get(), *cid)?;
+                        }
+                    }
+                    chunks.remove(*cid)?;
+                    embeddings.remove(*cid)?;
+                    removed.push(ChunkId::new(*cid));
+                }
+                for d in &doc_ids {
+                    by_doc.remove_all(*d)?;
+                }
+            }
+            wtx.open_multimap_table(CHUNKS_BY_DOMAIN)?.remove_all(did)?;
+
+            // Documents.
+            {
+                let mut docs = wtx.open_table(DOCUMENTS)?;
+                for d in &doc_ids {
+                    docs.remove(*d)?;
+                }
+            }
+            wtx.open_multimap_table(DOCS_BY_DOMAIN)?.remove_all(did)?;
+
+            // Tags.
+            {
+                let mut tags = wtx.open_table(TAGS)?;
+                for t in &tag_ids {
+                    tags.remove(*t)?;
+                }
+            }
+            wtx.open_multimap_table(TAGS_BY_DOMAIN)?.remove_all(did)?;
+
+            // Subdomains.
+            {
+                let mut subs = wtx.open_table(SUBDOMAINS)?;
+                for s in &sub_ids {
+                    subs.remove(*s)?;
+                }
+            }
+            wtx.open_multimap_table(SUBDOMAINS_BY_DOMAIN)?
+                .remove_all(did)?;
+
+            // By-name and content-hash lookups are keyed by "domain\u{1f}…".
+            let prefix = format!("{did}\u{1f}");
+            remove_keys_with_prefix(&wtx, TAG_IDS, &prefix)?;
+            remove_keys_with_prefix(&wtx, SUBDOMAIN_IDS, &prefix)?;
+            remove_keys_with_prefix(&wtx, DOCS_BY_HASH, &prefix)?;
+
+            // The domain row itself.
+            wtx.open_table(DOMAINS)?.remove(did)?;
+        }
+        wtx.commit()?;
+        Ok(removed)
+    }
+
+    /// Delete a subdomain and cascade-delete the documents assigned to it (their
+    /// chunks/embeddings/index entries go too). Returns the removed chunk ids.
+    /// The document deletes reuse [`delete_document`](Self::delete_document) so
+    /// each is atomic; the subdomain row is removed in a final transaction.
+    pub fn delete_subdomain(&self, id: SubdomainId) -> Result<Vec<ChunkId>> {
+        let sub = self.get_subdomain(id)?;
+        // Documents in this subdomain (scan the domain's docs; the set is small
+        // relative to chunks and there is no docs-by-subdomain index).
+        let doc_ids: Vec<DocumentId> = {
+            let rtx = self.db.begin_read()?;
+            let by_domain = rtx.open_multimap_table(DOCS_BY_DOMAIN)?;
+            let docs = rtx.open_table(DOCUMENTS)?;
+            let mut out = Vec::new();
+            for v in by_domain.get(sub.domain_id.get())? {
+                let did = v?.value();
+                if let Some(b) = docs.get(did)? {
+                    let doc: Document = codec::decode(b.value())?;
+                    if doc.subdomain_id == Some(id) {
+                        out.push(DocumentId::new(did));
+                    }
+                }
+            }
+            out
+        };
+        let mut removed = Vec::new();
+        for d in doc_ids {
+            removed.extend(self.delete_document(d)?);
+        }
+        // Remove the subdomain row, its by-domain entry and its name lookup.
+        let wtx = self.db.begin_write()?;
+        {
+            wtx.open_table(SUBDOMAINS)?.remove(id.get())?;
+            wtx.open_multimap_table(SUBDOMAINS_BY_DOMAIN)?
+                .remove(sub.domain_id.get(), id.get())?;
+            wtx.open_table(SUBDOMAIN_IDS)?
+                .remove(name_key(sub.domain_id, &sub.name).as_str())?;
+            // Defensive: drop any lingering chunk-by-subdomain entries.
+            wtx.open_multimap_table(CHUNKS_BY_SUBDOMAIN)?
+                .remove_all(id.get())?;
+        }
+        wtx.commit()?;
+        Ok(removed)
+    }
+
+    /// Update a tag's `display_name` and/or `description` (not its `name`, which
+    /// is the lookup key). `None` leaves a field unchanged.
+    pub fn update_tag(
+        &self,
+        id: TagId,
+        display_name: Option<&str>,
+        description: Option<&str>,
+    ) -> Result<Tag> {
+        let wtx = self.db.begin_write()?;
+        let updated = {
+            let mut t = wtx.open_table(TAGS)?;
+            let bytes = t
+                .get(id.get())?
+                .map(|g| g.value().to_vec())
+                .ok_or(NucleusError::TagNotFound(id))?;
+            let mut tag: Tag = codec::decode(&bytes)?;
+            if let Some(d) = display_name {
+                tag.display_name = d.to_string();
+            }
+            if let Some(d) = description {
+                tag.description = d.to_string();
+            }
+            t.insert(id.get(), codec::encode(&tag)?.as_slice())?;
+            tag
+        };
+        wtx.commit()?;
+        Ok(updated)
+    }
+
+    /// Delete a label (tag), detaching it from every chunk and document that
+    /// carries it (documents are **not** deleted — labels are transversal). One
+    /// transaction.
+    pub fn delete_tag(&self, id: TagId) -> Result<()> {
+        let tid = id.get();
+        // Read the tag first (404 if missing) to learn its domain and name.
+        let tag = self.get_tag(id)?;
+        let wtx = self.db.begin_write()?;
+        {
+            // Chunks carrying the tag.
+            let chunk_ids = collect_multimap(&wtx, CHUNKS_BY_TAG, tid)?;
+            {
+                let mut chunks = wtx.open_table(CHUNKS)?;
+                for cid in &chunk_ids {
+                    // Copy the bytes out so the read guard is dropped before the
+                    // mutating insert (can't hold both borrows of `chunks`).
+                    let bytes = chunks.get(*cid)?.map(|g| g.value().to_vec());
+                    if let Some(bytes) = bytes {
+                        let mut chunk: Chunk = codec::decode(&bytes)?;
+                        chunk.tags.retain(|t| *t != id);
+                        chunks.insert(*cid, codec::encode(&chunk)?.as_slice())?;
+                    }
+                }
+            }
+            wtx.open_multimap_table(CHUNKS_BY_TAG)?.remove_all(tid)?;
+
+            // Documents in the domain that reference the tag.
+            let doc_ids = collect_multimap(&wtx, DOCS_BY_DOMAIN, tag.domain_id.get())?;
+            {
+                let mut docs = wtx.open_table(DOCUMENTS)?;
+                for d in &doc_ids {
+                    let bytes = docs.get(*d)?.map(|g| g.value().to_vec());
+                    if let Some(bytes) = bytes {
+                        let mut doc: Document = codec::decode(&bytes)?;
+                        if doc.tags.contains(&id) {
+                            doc.tags.retain(|t| *t != id);
+                            docs.insert(*d, codec::encode(&doc)?.as_slice())?;
+                        }
+                    }
+                }
+            }
+
+            // The tag row, its by-domain entry and its name lookup.
+            wtx.open_table(TAGS)?.remove(tid)?;
+            wtx.open_multimap_table(TAGS_BY_DOMAIN)?
+                .remove(tag.domain_id.get(), tid)?;
+            wtx.open_table(TAG_IDS)?
+                .remove(name_key(tag.domain_id, &tag.name).as_str())?;
+        }
+        wtx.commit()?;
+        Ok(())
+    }
+
     // --- chunks & embeddings ----------------------------------------------
 
     /// Allocate and persist a chunk together with its embedding, updating all
@@ -1134,6 +1376,49 @@ fn name_key(domain_id: DomainId, name: &str) -> String {
     format!("{}\u{1f}{}", domain_id.get(), name)
 }
 
+/// Collect all values a `u64 -> u64` multimap holds for `key` into a `Vec`.
+/// Done in its own helper so the read handle is dropped before the caller
+/// reopens the table for mutation within the same transaction.
+fn collect_multimap(
+    wtx: &redb::WriteTransaction,
+    def: MultimapTableDefinition<u64, u64>,
+    key: u64,
+) -> Result<Vec<u64>> {
+    let t = wtx.open_multimap_table(def)?;
+    let mut out = Vec::new();
+    for v in t.get(key)? {
+        out.push(v?.value());
+    }
+    Ok(out)
+}
+
+/// Remove every entry of a `&str`-keyed table whose key starts with `prefix`.
+/// Used to drop a domain's by-name / content-hash lookups on cascade delete.
+/// Keys are collected first (dropping the read handle) before removal, so the
+/// table is never iterated and mutated at once.
+fn remove_keys_with_prefix(
+    wtx: &redb::WriteTransaction,
+    def: TableDefinition<&'static str, u64>,
+    prefix: &str,
+) -> Result<()> {
+    let keys: Vec<String> = {
+        let t = wtx.open_table(def)?;
+        let mut out = Vec::new();
+        for entry in t.iter()? {
+            let (k, _) = entry?;
+            if k.value().starts_with(prefix) {
+                out.push(k.value().to_string());
+            }
+        }
+        out
+    };
+    let mut t = wtx.open_table(def)?;
+    for k in &keys {
+        t.remove(k.as_str())?;
+    }
+    Ok(())
+}
+
 /// Read-modify-write a counter in the `SEQ` table, returning the new value.
 fn next_seq(seq: &mut redb::Table<&str, u64>, key: &str) -> Result<u64> {
     let current = seq.get(key)?.map(|g| g.value()).unwrap_or(0);
@@ -1246,5 +1531,148 @@ mod tests {
             .unwrap()
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn rename_and_delete_domain_cascades() {
+        let (s, _d) = temp_db();
+        let dom = s.create_domain("docs", "m", 2).unwrap();
+        let tag = s.create_tag(dom.id, "legal", "Legal", "", None).unwrap();
+        let sub = s.create_subdomain(dom.id, "irpf", "").unwrap();
+        let doc = s
+            .create_document(
+                dom.id,
+                Some(sub.id),
+                "d",
+                None,
+                Default::default(),
+                vec![tag.id],
+            )
+            .unwrap();
+        s.insert_chunk(
+            dom.id,
+            doc.id,
+            Some(sub.id),
+            0,
+            "a",
+            &[tag.id],
+            Default::default(),
+            &[1.0, 0.0],
+        )
+        .unwrap();
+        s.set_document_hash(dom.id, doc.id, "h1").unwrap();
+
+        // Rename works.
+        assert_eq!(s.rename_domain(dom.id, "renamed").unwrap().name, "renamed");
+
+        // Cascade delete wipes everything scoped to the domain.
+        let removed = s.delete_domain(dom.id).unwrap();
+        assert_eq!(removed.len(), 1);
+        assert!(matches!(
+            s.get_domain(dom.id),
+            Err(NucleusError::DomainNotFound(_))
+        ));
+        assert!(s.list_tags(dom.id).unwrap().is_empty());
+        assert!(s.list_subdomains(dom.id).unwrap().is_empty());
+        assert!(s.list_documents(dom.id, 0, 100).unwrap().is_empty());
+        assert!(s.embeddings_in_domain(dom.id).unwrap().is_empty());
+        assert_eq!(s.tag_id_by_name(dom.id, "legal").unwrap(), None);
+        assert_eq!(s.subdomain_id_by_name(dom.id, "irpf").unwrap(), None);
+        assert_eq!(s.document_id_by_hash(dom.id, "h1").unwrap(), None);
+
+        // A second delete is a clean 404, not a panic.
+        assert!(matches!(
+            s.delete_domain(dom.id),
+            Err(NucleusError::DomainNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn delete_tag_detaches_without_deleting_docs() {
+        let (s, _d) = temp_db();
+        let dom = s.create_domain("docs", "m", 2).unwrap();
+        let tag = s.create_tag(dom.id, "legal", "Legal", "", None).unwrap();
+        let doc = s
+            .create_document(dom.id, None, "d", None, Default::default(), vec![tag.id])
+            .unwrap();
+        let cid = s
+            .insert_chunk(
+                dom.id,
+                doc.id,
+                None,
+                0,
+                "a",
+                &[tag.id],
+                Default::default(),
+                &[1.0, 0.0],
+            )
+            .unwrap();
+
+        s.delete_tag(tag.id).unwrap();
+
+        // Tag gone, name lookup gone.
+        assert!(matches!(
+            s.get_tag(tag.id),
+            Err(NucleusError::TagNotFound(_))
+        ));
+        assert_eq!(s.tag_id_by_name(dom.id, "legal").unwrap(), None);
+        // Document and chunk survive, detached from the tag.
+        assert!(s.get_document(doc.id).unwrap().tags.is_empty());
+        assert!(s.get_chunk(cid).unwrap().tags.is_empty());
+        // The by-tag index no longer points anywhere.
+        assert!(s
+            .candidates_for_tags(&[tag.id], false)
+            .unwrap()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn delete_subdomain_cascades_its_documents() {
+        let (s, _d) = temp_db();
+        let dom = s.create_domain("docs", "m", 2).unwrap();
+        let sub = s.create_subdomain(dom.id, "irpf", "").unwrap();
+        let in_sub = s
+            .create_document(dom.id, Some(sub.id), "in", None, Default::default(), vec![])
+            .unwrap();
+        s.insert_chunk(
+            dom.id,
+            in_sub.id,
+            Some(sub.id),
+            0,
+            "a",
+            &[],
+            Default::default(),
+            &[1.0, 0.0],
+        )
+        .unwrap();
+        let other = s
+            .create_document(dom.id, None, "out", None, Default::default(), vec![])
+            .unwrap();
+        s.insert_chunk(
+            dom.id,
+            other.id,
+            None,
+            0,
+            "b",
+            &[],
+            Default::default(),
+            &[0.0, 1.0],
+        )
+        .unwrap();
+
+        let removed = s.delete_subdomain(sub.id).unwrap();
+        assert_eq!(removed.len(), 1);
+        assert!(matches!(
+            s.get_subdomain(sub.id),
+            Err(NucleusError::SubdomainNotFound(_))
+        ));
+        // The subdomain's document is gone; the other one survives.
+        assert!(matches!(
+            s.get_document(in_sub.id),
+            Err(NucleusError::DocumentNotFound(_))
+        ));
+        assert!(s.get_document(other.id).is_ok());
+        assert_eq!(s.subdomain_id_by_name(dom.id, "irpf").unwrap(), None);
     }
 }

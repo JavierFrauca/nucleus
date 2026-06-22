@@ -136,6 +136,10 @@ pub struct Config {
     pub embed_batch_window_ms: u64,
     /// Directory where backups (snapshots, deltas, catalog) are stored.
     pub backup_dir: PathBuf,
+    /// Per-client request rate limit (req/s). `0` (default) disables limiting.
+    pub rate_limit_rps: f64,
+    /// Burst capacity for the rate limiter; defaults to `max(rps, 1)`.
+    pub rate_limit_burst: f64,
     /// Scheduled-backup cadence in seconds; `0` disables scheduling.
     pub backup_interval_secs: u64,
     /// Every Nth scheduled backup is a full (the rest differentials).
@@ -219,6 +223,16 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(5),
+            rate_limit_rps: env::var("NUCLEUS_RATE_LIMIT_RPS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|&n: &f64| n > 0.0)
+                .unwrap_or(0.0),
+            rate_limit_burst: env::var("NUCLEUS_RATE_LIMIT_BURST")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|&n: &f64| n >= 1.0)
+                .unwrap_or(0.0),
             backup_interval_secs: env::var("NUCLEUS_BACKUP_INTERVAL")
                 .ok()
                 .and_then(|v| parse_duration_secs(&v))

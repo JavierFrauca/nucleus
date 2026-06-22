@@ -202,8 +202,8 @@ impl BackupManager {
         let mut kept = Vec::new();
         let mut removed = 0;
         for r in &recs {
-            let drop = doomed.contains(&r.id)
-                || r.parent.as_ref().is_some_and(|p| doomed.contains(p));
+            let drop =
+                doomed.contains(&r.id) || r.parent.as_ref().is_some_and(|p| doomed.contains(p));
             if drop {
                 let _ = fs::remove_file(self.dir.join(&r.file));
                 removed += 1;
@@ -285,6 +285,7 @@ mod tests {
                     document_ids: vec![],
                     subdomain: None,
                     filter: None,
+                    diversity: 0.0,
                 },
             )
             .unwrap();

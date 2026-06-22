@@ -71,6 +71,14 @@ Lista todos los dominios → `[Domain, …]`.
 ### `GET /v1/domains/{id}` · *Read*
 Devuelve un `Domain`.
 
+### `PATCH /v1/domains/{id}` · *Admin*
+Renombra el dominio. Cuerpo `{ "name": "nuevo" }`; devuelve el `Domain` actualizado.
+
+### `DELETE /v1/domains/{id}` · *Admin*
+Borra el dominio **en cascada**: subdominios, documentos, chunks, embeddings, etiquetas
+e índices, además de las búsquedas por nombre y por hash del dominio. Responde `204`
+(o `404` si no existe).
+
 ---
 
 ## Subdominios
@@ -88,6 +96,10 @@ Respuesta:
 ### `GET /v1/domains/{id}/subdomains` · *Read*
 Lista los subdominios del dominio → `[Subdomain, …]`.
 
+### `DELETE /v1/domains/{id}/subdomains/{sub_id}` · *Write*
+Borra el subdominio y, **en cascada**, los documentos asignados a él (con sus
+chunks/embeddings/índices). Responde `204`.
+
 ---
 
 ## Labels (tags)
@@ -101,6 +113,15 @@ Solo `name` es obligatorio. Respuesta: `Tag` = `{ id, domain_id, name, display_n
 
 ### `GET /v1/domains/{id}/tags` · *Read*
 Lista las etiquetas del dominio → `[Tag, …]`.
+
+### `PATCH /v1/domains/{id}/tags/{tag_id}` · *Write*
+Edita `display_name` y/o `description` (no el `name`, que es la clave de búsqueda).
+Campos omitidos se dejan igual. Cuerpo `{ "display_name": "…", "description": "…" }`;
+devuelve el `Tag` actualizado.
+
+### `DELETE /v1/domains/{id}/tags/{tag_id}` · *Write*
+Borra la etiqueta y la **desasocia** de chunks y documentos (que **no** se borran:
+las labels son transversales). Responde `204`.
 
 > En la ingesta puedes pasar labels **por nombre** (`labels`) y se crean solas; no hace
 > falta usar este endpoint salvo para definir jerarquías o descripciones.
@@ -199,7 +220,8 @@ en orden de documento → `[Chunk, …]`. Por defecto `before=1`, `after=1`.
   "tags": [1, 2],
   "match_all": false,
   "document_ids": [10],
-  "filter": "tag:2026 AND NOT tag:borrador"
+  "filter": "tag:2026 AND NOT tag:borrador",
+  "diversity": 0.3
 }
 ```
 
@@ -213,6 +235,7 @@ en orden de documento → `[Chunk, …]`. Por defecto `before=1`, `after=1`.
 | `match_all` | Si `true`, exige **todas** las `tags`; si no, cualquiera. |
 | `document_ids` | Acota a estos documentos. |
 | `filter` | Expresión del [lenguaje de consulta](lenguaje-consulta.md). |
+| `diversity` | Diversidad de resultados (MMR) en `[0, 1]`. `0` (defecto) = orden por relevancia pura; subirlo penaliza chunks redundantes entre sí. |
 
 Los filtros presentes se **intersecan**. Respuesta: lista de hits rankeados:
 ```json

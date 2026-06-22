@@ -44,6 +44,78 @@ fn rrf_fuse(lists: &[Vec<(ChunkId, f32)>], k: usize) -> Vec<(ChunkId, f32)> {
     fused
 }
 
+/// Cosine similarity of two vectors. Returns `0.0` if either is empty or
+/// zero-norm (degenerate), so it never produces `NaN`.
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    let mut dot = 0.0f32;
+    let mut na = 0.0f32;
+    let mut nb = 0.0f32;
+    for i in 0..a.len().min(b.len()) {
+        dot += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+    }
+    if na == 0.0 || nb == 0.0 {
+        0.0
+    } else {
+        dot / (na.sqrt() * nb.sqrt())
+    }
+}
+
+/// Re-rank `items` with **Maximal Marginal Relevance**, returning the top-`k`.
+///
+/// At each step it picks the candidate maximising
+/// `lambda * relevance - (1 - lambda) * max_similarity_to_already_picked`,
+/// where relevance is the incoming score min-max normalised to `[0, 1]` (so it
+/// mixes sanely with cosine similarity) and similarity uses the candidate
+/// embeddings in `embs` (a missing embedding counts as zero similarity).
+/// `lambda == 1` is pure relevance; `lambda == 0` is pure diversity. The
+/// reported score stays the original relevance.
+fn mmr_select(
+    items: Vec<(Chunk, f32)>,
+    embs: &HashMap<ChunkId, Vec<f32>>,
+    lambda: f32,
+    k: usize,
+) -> Vec<(Chunk, f32)> {
+    let n = items.len();
+    let target = k.min(n);
+    if target == 0 {
+        return Vec::new();
+    }
+    // Normalise relevance to [0, 1].
+    let (min, max) = items
+        .iter()
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), (_, s)| {
+            (lo.min(*s), hi.max(*s))
+        });
+    let span = (max - min).max(f32::EPSILON);
+    let rel: Vec<f32> = items.iter().map(|(_, s)| (s - min) / span).collect();
+    let empty: Vec<f32> = Vec::new();
+    let emb = |i: usize| embs.get(&items[i].0.id).unwrap_or(&empty);
+
+    let mut chosen: Vec<usize> = Vec::with_capacity(target);
+    let mut remaining: Vec<usize> = (0..n).collect();
+    while chosen.len() < target && !remaining.is_empty() {
+        let mut best_pos = 0;
+        let mut best_score = f32::NEG_INFINITY;
+        for (pos, &i) in remaining.iter().enumerate() {
+            let max_sim = chosen
+                .iter()
+                .map(|&j| cosine(emb(i), emb(j)))
+                .fold(0.0f32, f32::max);
+            let score = lambda * rel[i] - (1.0 - lambda) * max_sim;
+            if score > best_score {
+                best_score = score;
+                best_pos = pos;
+            }
+        }
+        chosen.push(remaining.remove(best_pos));
+    }
+    // Reassemble in the chosen order, preserving each chunk's original score.
+    let mut slots: Vec<Option<(Chunk, f32)>> = items.into_iter().map(Some).collect();
+    chosen.into_iter().filter_map(|i| slots[i].take()).collect()
+}
+
 /// The body of an ingest request: either raw text (the engine chunks it) or
 /// already-split chunks.
 pub enum IngestBody {
@@ -78,6 +150,10 @@ pub struct SearchRequest {
     pub subdomain: Option<SubdomainId>,
     /// Optional [query-language](crate::query) filter, ANDed with the above.
     pub filter: Option<String>,
+    /// Result diversity via Maximal Marginal Relevance, in `[0, 1]`. `0`
+    /// (default) disables it (pure relevance order); higher values trade
+    /// relevance for less redundancy among the returned chunks.
+    pub diversity: f32,
 }
 
 /// One ranked result.
@@ -520,6 +596,54 @@ impl Engine {
         Ok(())
     }
 
+    /// Rename a domain.
+    pub fn rename_domain(&self, id: DomainId, name: &str) -> Result<Domain> {
+        self.storage.rename_domain(id, name)
+    }
+
+    /// Delete a domain and everything under it, discarding its in-memory vector
+    /// and lexical indexes.
+    pub fn delete_domain(&self, id: DomainId) -> Result<()> {
+        self.storage.delete_domain(id)?;
+        self.indexes.write().remove(&id);
+        self.lexical.write().remove(&id);
+        Ok(())
+    }
+
+    /// Delete a subdomain, cascade-deleting its documents and dropping their
+    /// chunks from the in-memory indexes.
+    pub fn delete_subdomain(&self, id: SubdomainId) -> Result<()> {
+        let sub = self.storage.get_subdomain(id)?;
+        let removed = self.storage.delete_subdomain(id)?;
+        if let Some(ix) = self.indexes.write().get_mut(&sub.domain_id) {
+            for cid in &removed {
+                ix.remove(*cid);
+            }
+        }
+        if let Some(li) = self.lexical.write().get_mut(&sub.domain_id) {
+            for cid in &removed {
+                li.remove(*cid);
+            }
+        }
+        Ok(())
+    }
+
+    /// Update a label's display name / description.
+    pub fn update_tag(
+        &self,
+        id: TagId,
+        display_name: Option<&str>,
+        description: Option<&str>,
+    ) -> Result<Tag> {
+        self.storage.update_tag(id, display_name, description)
+    }
+
+    /// Delete a label, detaching it from chunks and documents (which survive).
+    /// No index change: embeddings are untouched.
+    pub fn delete_tag(&self, id: TagId) -> Result<()> {
+        self.storage.delete_tag(id)
+    }
+
     // --- search ------------------------------------------------------------
 
     /// Retrieve the top-`k` chunks in a domain for a query, applying tag and
@@ -534,8 +658,11 @@ impl Engine {
             document_ids,
             subdomain,
             filter,
+            diversity,
         } = req;
         let k = k.min(MAX_K);
+        let diversity = diversity.clamp(0.0, 1.0);
+        let do_mmr = diversity > 0.0;
 
         let (query_vec, query_text) = match query {
             QueryInput::Vector(v) => {
@@ -570,9 +697,12 @@ impl Engine {
         let reranker = self.reranker.read().clone();
         let do_rerank = reranker.is_some() && query_text.is_some();
         // When reranking, re-score a bounded candidate window (the cross-encoder
-        // is costly per pair): at least `k`, at most what we fetched.
+        // is costly per pair): at least `k`, at most what we fetched. MMR also
+        // needs a pool wider than `k` to have anything to diversify from.
         let window = if do_rerank {
             (*self.rerank_candidates.read()).clamp(k, fetch)
+        } else if do_mmr {
+            fetch
         } else {
             k
         };
@@ -616,32 +746,43 @@ impl Engine {
             }
         }
 
-        // Optional second stage: cross-encoder rerank, then take the top-k.
-        let hits = match (do_rerank, reranker, &query_text) {
+        // For MMR we need the candidate embeddings; fetch them (aligned by chunk
+        // id) before the window is consumed by reranking.
+        let cand_embs: HashMap<ChunkId, Vec<f32>> = if do_mmr {
+            items
+                .iter()
+                .filter_map(|(c, _)| self.storage.get_embedding(c.id).ok().map(|e| (c.id, e)))
+                .collect()
+        } else {
+            HashMap::new()
+        };
+
+        // Stage 2: optional cross-encoder rerank, which re-scores the window.
+        let mut scored: Vec<(Chunk, f32)> = match (do_rerank, reranker, &query_text) {
             (true, Some(reranker), Some(text)) => {
                 let docs: Vec<String> = items.iter().map(|(c, _)| c.text.clone()).collect();
                 let scores = reranker.rerank(text, &docs)?;
-                let mut reranked: Vec<(Chunk, f32)> = items
+                items
                     .into_iter()
                     .zip(scores)
                     .map(|((chunk, _), score)| (chunk, score))
-                    .collect();
-                reranked.sort_by(|a, b| b.1.total_cmp(&a.1));
-                reranked.truncate(k);
-                reranked
-                    .into_iter()
-                    .map(|(chunk, score)| SearchHit { chunk, score })
                     .collect()
             }
-            _ => {
-                items.truncate(k);
-                items
-                    .into_iter()
-                    .map(|(chunk, score)| SearchHit { chunk, score })
-                    .collect()
-            }
+            _ => items,
         };
-        Ok(hits)
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+        // Stage 3: either diversify with MMR or take a plain top-`k`.
+        let selected = if do_mmr {
+            mmr_select(scored, &cand_embs, 1.0 - diversity, k)
+        } else {
+            scored.truncate(k);
+            scored
+        };
+        Ok(selected
+            .into_iter()
+            .map(|(chunk, score)| SearchHit { chunk, score })
+            .collect())
     }
 
     // --- tokens / auth -----------------------------------------------------
@@ -834,6 +975,7 @@ mod tests {
                     document_ids: vec![],
                     subdomain: None,
                     filter: None,
+                    diversity: 0.0,
                 },
             )
             .unwrap();
@@ -877,6 +1019,7 @@ mod tests {
                     document_ids: vec![],
                     subdomain: None,
                     filter: None,
+                    diversity: 0.0,
                 },
             )
             .unwrap();
@@ -919,6 +1062,7 @@ mod tests {
                     document_ids: vec![],
                     subdomain: None,
                     filter: Some(filter.to_string()),
+                    diversity: 0.0,
                 },
             )
             .unwrap()
@@ -944,6 +1088,7 @@ mod tests {
                     document_ids: vec![],
                     subdomain: None,
                     filter: Some("doc:abc".into()),
+                    diversity: 0.0,
                 },
             )
             .is_err());
@@ -987,6 +1132,7 @@ mod tests {
                     document_ids: vec![],
                     subdomain: None,
                     filter: Some(filter.to_string()),
+                    diversity: 0.0,
                 },
             )
             .unwrap()
@@ -1070,6 +1216,7 @@ mod tests {
                     document_ids: vec![],
                     subdomain: None,
                     filter: None,
+                    diversity: 0.0,
                 },
             )
             .unwrap();
@@ -1112,11 +1259,59 @@ mod tests {
                     document_ids: vec![],
                     subdomain: None,
                     filter: None,
+                    diversity: 0.0,
                 },
             )
             .unwrap();
         assert!(!hits.is_empty());
         assert!(hits[0].chunk.text.contains("laboral"));
+    }
+
+    #[test]
+    fn mmr_diversifies_results() {
+        let (e, _d) = engine();
+        let dom = e.create_domain("docs", None).unwrap();
+        e.ingest_document(
+            dom.id,
+            "d",
+            None,
+            BTreeMap::new(),
+            vec![],
+            IngestBody::Chunks(vec![
+                // Two highly-relevant near-duplicates plus one distinct chunk.
+                "contrato laboral indefinido".into(),
+                "contrato laboral temporal".into(),
+                "contrato de obras".into(),
+            ]),
+        )
+        .unwrap();
+
+        let run = |diversity: f32| {
+            e.search(
+                dom.id,
+                SearchRequest {
+                    query: QueryInput::Text("contrato laboral".into()),
+                    k: 2,
+                    tags: vec![],
+                    match_all: false,
+                    document_ids: vec![],
+                    subdomain: None,
+                    filter: None,
+                    diversity,
+                },
+            )
+            .unwrap()
+        };
+
+        // Pure relevance keeps the two near-duplicates (both share "laboral").
+        let plain = run(0.0);
+        assert_eq!(plain.len(), 2);
+        assert!(!plain.iter().any(|h| h.chunk.text.contains("obras")));
+
+        // High diversity promotes the distinct chunk into the top-2.
+        let diverse = run(1.0);
+        assert_eq!(diverse.len(), 2);
+        assert!(diverse.iter().any(|h| h.chunk.text.contains("obras")));
     }
 
     #[test]
@@ -1193,6 +1388,7 @@ mod tests {
                     document_ids: vec![],
                     subdomain: None,
                     filter: None,
+                    diversity: 0.0,
                 },
             )
             .unwrap();
@@ -1249,6 +1445,7 @@ mod tests {
                     document_ids: vec![],
                     subdomain: None,
                     filter: None,
+                    diversity: 0.0,
                 },
             )
             .unwrap();
@@ -1289,6 +1486,7 @@ mod tests {
                     document_ids: vec![],
                     subdomain: None,
                     filter: None,
+                    diversity: 0.0,
                 },
             )
             .unwrap();

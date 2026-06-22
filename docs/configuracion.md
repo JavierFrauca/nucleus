@@ -20,6 +20,8 @@ valores por defecto razonables.
 | `NUCLEUS_SEARCH_WAIT_MS` | `2000` | Cuánto espera una búsqueda un hueco de concurrencia antes de devolver `503` (load-shed). Bájalo (p.ej. 200) para rechazar antes bajo avalancha. |
 | `NUCLEUS_EMBED_BATCH_MAX` | `1` (desactivado) | Agrupa embeddings de consulta en una sola inferencia. **Off por defecto**: en CPU empeora (serializa lo que ya paraleliza). Súbelo (p.ej. 16) solo en GPU. |
 | `NUCLEUS_EMBED_BATCH_WINDOW_MS` | `5` | Ventana para llenar un lote (solo si `NUCLEUS_EMBED_BATCH_MAX > 1`). |
+| `NUCLEUS_RATE_LIMIT_RPS` | (vacío → desactivado) | Límite de peticiones por segundo **por cliente** (IP). `0`/ausente lo desactiva. Token-bucket en memoria por nodo; al exceder, `429`. |
+| `NUCLEUS_RATE_LIMIT_BURST` | `max(rps, 1)` | Capacidad de ráfaga del rate limiter (tokens acumulables). Solo aplica si `NUCLEUS_RATE_LIMIT_RPS > 0`. |
 | `NUCLEUS_BACKUP_DIR` | `<dir BD>/nucleus_backups` | Directorio de copias de seguridad (snapshots, deltas y catálogo). |
 | `NUCLEUS_BACKUP_INTERVAL` | (vacío → desactivado) | Cadencia de copias programadas: `30m`, `6h`, `1d`, `2w` o segundos. |
 | `NUCLEUS_BACKUP_FULL_EVERY` | `7` | Cada cuántas copias programadas se hace una **full** (el resto, diferenciales). |
