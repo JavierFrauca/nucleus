@@ -71,6 +71,14 @@ Lista todos los dominios → `[Domain, …]`.
 ### `GET /v1/domains/{id}` · *Read*
 Devuelve un `Domain`.
 
+### `PATCH /v1/domains/{id}` · *Admin*
+Renombra el dominio. Cuerpo `{ "name": "nuevo" }`; devuelve el `Domain` actualizado.
+
+### `DELETE /v1/domains/{id}` · *Admin*
+Borra el dominio **en cascada**: subdominios, documentos, chunks, embeddings, etiquetas
+e índices, además de las búsquedas por nombre y por hash del dominio. Responde `204`
+(o `404` si no existe).
+
 ---
 
 ## Subdominios
@@ -88,6 +96,10 @@ Respuesta:
 ### `GET /v1/domains/{id}/subdomains` · *Read*
 Lista los subdominios del dominio → `[Subdomain, …]`.
 
+### `DELETE /v1/domains/{id}/subdomains/{sub_id}` · *Write*
+Borra el subdominio y, **en cascada**, los documentos asignados a él (con sus
+chunks/embeddings/índices). Responde `204`.
+
 ---
 
 ## Labels (tags)
@@ -101,6 +113,15 @@ Solo `name` es obligatorio. Respuesta: `Tag` = `{ id, domain_id, name, display_n
 
 ### `GET /v1/domains/{id}/tags` · *Read*
 Lista las etiquetas del dominio → `[Tag, …]`.
+
+### `PATCH /v1/domains/{id}/tags/{tag_id}` · *Write*
+Edita `display_name` y/o `description` (no el `name`, que es la clave de búsqueda).
+Campos omitidos se dejan igual. Cuerpo `{ "display_name": "…", "description": "…" }`;
+devuelve el `Tag` actualizado.
+
+### `DELETE /v1/domains/{id}/tags/{tag_id}` · *Write*
+Borra la etiqueta y la **desasocia** de chunks y documentos (que **no** se borran:
+las labels son transversales). Responde `204`.
 
 > En la ingesta puedes pasar labels **por nombre** (`labels`) y se crean solas; no hace
 > falta usar este endpoint salvo para definir jerarquías o descripciones.
@@ -132,6 +153,14 @@ Respuesta (`duplicate: true` y `job_id: 0` si ese contenido ya estaba ingestado 
 el dominio — **deduplicación por hash de contenido**):
 ```json
 { "document_id": 2, "job_id": 2, "duplicate": false }
+```
+
+### `POST /v1/domains/{id}/documents/batch` · *Write*
+Ingesta **varios documentos** en una petición: el cuerpo es un **array** de objetos
+con la misma forma que `/documents`. Cada uno se deduplica por separado. Responde un
+array de `IngestResp` en el mismo orden.
+```json
+[ {"title":"a","text":"…"}, {"title":"b","chunks":["…","…"]} ]
 ```
 
 ### `POST /v1/domains/{id}/files` · *Write*
@@ -175,6 +204,16 @@ Devuelve el `Document`.
 ### `DELETE /v1/documents/{id}` · *Write*
 Borra el documento y todos sus chunks/embeddings/índices. Responde `204`.
 
+### `PATCH /v1/documents/{id}` · *Write*
+Re-asigna labels y/o subdominio (propagado a sus chunks) sin re-ingestar.
+```json
+{ "labels": ["revisado", "2026"], "subdomain": "irpf" }
+```
+- `labels` (nombres, se crean) y/o `tags` (ids) presentes → **reemplazan** el conjunto.
+- `subdomain` presente → mueve el documento (se crea si no existe); cadena vacía lo
+  desasigna; **omitirlo** lo deja igual.
+- Devuelve el `Document` actualizado.
+
 ---
 
 ## Chunks
@@ -199,7 +238,8 @@ en orden de documento → `[Chunk, …]`. Por defecto `before=1`, `after=1`.
   "tags": [1, 2],
   "match_all": false,
   "document_ids": [10],
-  "filter": "tag:2026 AND NOT tag:borrador"
+  "filter": "tag:2026 AND NOT tag:borrador",
+  "diversity": 0.3
 }
 ```
 
@@ -213,15 +253,28 @@ en orden de documento → `[Chunk, …]`. Por defecto `before=1`, `after=1`.
 | `match_all` | Si `true`, exige **todas** las `tags`; si no, cualquiera. |
 | `document_ids` | Acota a estos documentos. |
 | `filter` | Expresión del [lenguaje de consulta](lenguaje-consulta.md). |
+| `diversity` | Diversidad de resultados (MMR) en `[0, 1]`. `0` (defecto) = orden por relevancia pura; subirlo penaliza chunks redundantes entre sí. |
 
-Los filtros presentes se **intersecan**. Respuesta: lista de hits rankeados:
+Los filtros presentes se **intersecan**. Respuesta: lista de hits rankeados.
+`snippet` es un extracto centrado en el término que casa (se omite en búsquedas
+solo-vector); `domain_id` distingue resultados en búsquedas multi-dominio:
 ```json
 [
-  { "chunk_id": 1, "document_id": 1, "score": 0.927,
+  { "chunk_id": 1, "document_id": 1, "domain_id": 1, "score": 0.927,
     "text": "Tabla de tipos de retención de IRPF…",
+    "snippet": "…tipos de retención de IRPF para 2026…",
     "tags": [1, 2], "metadata": { "filename": "IRPF_2026.pdf" } }
 ]
 ```
+
+### `POST /v1/search` · *Read (en cada dominio)*
+Busca en **varios dominios del mismo modelo** y fusiona por score. Los filtros por
+id (tags, document_ids, subdomain) no aplican entre dominios; usa `filter` (por
+nombre de tag).
+```json
+{ "domain_ids": [1, 2], "query": "contrato laboral", "k": 5, "diversity": 0.2 }
+```
+Respuesta: misma forma que la búsqueda por dominio (cada hit lleva su `domain_id`).
 
 **Ranking híbrido.** Cada búsqueda fusiona el índice **vectorial** (semántico) con el
 **léxico BM25** (términos literales) mediante RRF, de modo que tanto un sinónimo como una
@@ -263,14 +316,19 @@ Respuesta (el `token` se muestra **una sola vez**):
 ```
 
 ### `GET /v1/tokens` · *Admin*
-Lista metadatos de tokens (sin el secreto):
+Lista metadatos de tokens (sin el secreto). `last_used_at` es el último uso con
+éxito (en memoria; `null` si no se ha usado desde el arranque):
 ```json
 [ { "id": 1, "name": "bootstrap-admin", "scopes": [ { "domain": "All", "perm": "Admin" } ],
-    "created_at": 1781883600000, "expires_at": null } ]
+    "created_at": 1781883600000, "expires_at": null, "last_used_at": 1781884000000 } ]
 ```
 
 ### `DELETE /v1/tokens/{id}` · *Admin*
 Revoca un token. Responde `204` (idempotente).
+
+### `POST /v1/tokens/{id}/rotate` · *Admin*
+Rota el secreto: mismo id/scopes/expiración, **nuevo** secreto (invalida el viejo).
+Devuelve el nuevo `token` (mostrado **una sola vez**), igual que al crearlo.
 
 ---
 
@@ -281,6 +339,11 @@ Vuelca a disco los índices persistibles (HNSW). Responde:
 ```json
 { "persisted": 3 }
 ```
+
+### `POST /v1/domains/{id}/reindex` · *Admin*
+Re-embebe todos los chunks del dominio y reconstruye su índice, como **job** en
+background. Con `{ "model": "bge-small-en-v1.5" }` cambia el modelo del dominio (y
+la dimensión); sin cuerpo, re-embebe con el modelo actual. Responde `{ "job_id": N }`.
 
 ---
 

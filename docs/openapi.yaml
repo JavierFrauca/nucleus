@@ -115,6 +115,31 @@ paths:
             application/json: { schema: { $ref: "#/components/schemas/Domain" } }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+    patch:
+      tags: [domains]
+      summary: Rename a domain (admin)
+      parameters: [{ $ref: "#/components/parameters/IdPath" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RenameDomainReq" }
+      responses:
+        "200":
+          description: Updated domain
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/Domain" } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [domains]
+      summary: Delete a domain and everything under it (admin, cascade)
+      parameters: [{ $ref: "#/components/parameters/IdPath" }]
+      responses:
+        "204": { description: Deleted }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
 
   /v1/domains/{id}/documents:
     post:
@@ -153,6 +178,66 @@ paths:
               schema: { type: array, items: { $ref: "#/components/schemas/Document" } }
         "403": { $ref: "#/components/responses/Error" }
 
+  /v1/domains/{id}/documents/batch:
+    post:
+      tags: [documents]
+      summary: Ingest many documents in one request (async)
+      parameters: [{ $ref: "#/components/parameters/IdPath" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: array, items: { $ref: "#/components/schemas/IngestReq" } }
+      responses:
+        "200":
+          description: One result per item, in order
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/IngestResp" } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /v1/domains/{id}/reindex:
+    post:
+      tags: [maintenance]
+      summary: Re-embed a domain (optionally switching model) and rebuild its index (async)
+      parameters: [{ $ref: "#/components/parameters/IdPath" }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReindexReq" }
+      responses:
+        "200":
+          description: Reindex job enqueued
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/ReindexResp" } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /v1/search:
+    post:
+      tags: [search]
+      summary: Search across several domains of the same model
+      description: |
+        Requires `Read` on every domain in `domain_ids`. Per-domain id filters
+        don't apply across domains; use `filter` (by tag name). Results from all
+        domains are merged by score into the global top-`k`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MultiSearchReq" }
+      responses:
+        "200":
+          description: Ranked hits (each carries its domain_id)
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Hit" } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+
   /v1/domains/{id}/files:
     post:
       tags: [documents]
@@ -189,6 +274,8 @@ paths:
         Provide `query` (text, embedded with the domain model) or `query_vector`
         (precomputed). Filters (`tags`, `document_ids`, `subdomain`, `filter`)
         are intersected. An unknown `subdomain` name yields an empty result.
+        Set `diversity` in (0, 1] to re-rank results with Maximal Marginal
+        Relevance, trading some relevance for less redundancy.
       parameters: [{ $ref: "#/components/parameters/IdPath" }]
       requestBody:
         required: true
@@ -232,6 +319,36 @@ paths:
               schema: { type: array, items: { $ref: "#/components/schemas/Tag" } }
         "403": { $ref: "#/components/responses/Error" }
 
+  /v1/domains/{id}/tags/{tag_id}:
+    patch:
+      tags: [tags]
+      summary: Update a tag's display name / description
+      parameters:
+        - { $ref: "#/components/parameters/IdPath" }
+        - { name: tag_id, in: path, required: true, schema: { type: integer, format: int64 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateTagReq" }
+      responses:
+        "200":
+          description: Updated tag
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/Tag" } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [tags]
+      summary: Delete a tag, detaching it from chunks/documents
+      parameters:
+        - { $ref: "#/components/parameters/IdPath" }
+        - { name: tag_id, in: path, required: true, schema: { type: integer, format: int64 } }
+      responses:
+        "204": { description: Deleted }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
   /v1/domains/{id}/subdomains:
     post:
       tags: [subdomains]
@@ -260,6 +377,18 @@ paths:
               schema: { type: array, items: { $ref: "#/components/schemas/Subdomain" } }
         "403": { $ref: "#/components/responses/Error" }
 
+  /v1/domains/{id}/subdomains/{sub_id}:
+    delete:
+      tags: [subdomains]
+      summary: Delete a subdomain, cascade-deleting its documents
+      parameters:
+        - { $ref: "#/components/parameters/IdPath" }
+        - { name: sub_id, in: path, required: true, schema: { type: integer, format: int64 } }
+      responses:
+        "204": { description: Deleted }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
   /v1/documents/{id}:
     get:
       tags: [documents]
@@ -268,6 +397,22 @@ paths:
       responses:
         "200":
           description: Document
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/Document" } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    patch:
+      tags: [documents]
+      summary: Re-assign a document's labels and/or subdomain
+      parameters: [{ $ref: "#/components/parameters/IdPath" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateDocReq" }
+      responses:
+        "200":
+          description: Updated document
           content:
             application/json: { schema: { $ref: "#/components/schemas/Document" } }
         "403": { $ref: "#/components/responses/Error" }
@@ -372,6 +517,20 @@ paths:
       parameters: [{ $ref: "#/components/parameters/IdPath" }]
       responses:
         "204": { description: Deleted (or already absent) }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /v1/tokens/{id}/rotate:
+    post:
+      tags: [tokens]
+      summary: Rotate a token's secret (admin)
+      description: Same id/scopes/expiry, a fresh secret; the old one stops working. Plaintext shown once.
+      parameters: [{ $ref: "#/components/parameters/IdPath" }]
+      responses:
+        "200":
+          description: New plaintext token (shown once)
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/CreateTokenResp" } }
+        "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
 
   /v1/maintenance/persist:
@@ -604,17 +763,50 @@ components:
         document_ids: { type: array, items: { type: integer, format: int64 } }
         subdomain: { type: string, nullable: true, description: "Restrict to this subdomain (by name)." }
         filter: { type: string, nullable: true, description: "Query-language filter, e.g. `tag:legal AND NOT tag:draft`." }
+        diversity: { type: number, format: float, default: 0, minimum: 0, maximum: 1, description: "Result diversity (MMR). 0 = pure relevance; higher reduces redundancy." }
 
     Hit:
       type: object
       properties:
         chunk_id: { type: integer, format: int64 }
         document_id: { type: integer, format: int64 }
+        domain_id: { type: integer, format: int64 }
         score: { type: number, format: float, description: "Score of the last applied stage (RRF or rerank); scale is not portable." }
         text: { type: string }
+        snippet: { type: string, nullable: true, description: "Excerpt centred on the matched query terms; omitted for vector-only queries." }
         tags: { type: array, items: { type: integer, format: int64 } }
         metadata: { $ref: "#/components/schemas/StringMap" }
-      required: [chunk_id, document_id, score, text, tags, metadata]
+      required: [chunk_id, document_id, domain_id, score, text, tags, metadata]
+
+    MultiSearchReq:
+      type: object
+      properties:
+        domain_ids: { type: array, items: { type: integer, format: int64 }, description: "Domains to search; all must share the same model." }
+        query: { type: string, nullable: true }
+        query_vector: { type: array, nullable: true, items: { type: number, format: float } }
+        k: { type: integer, default: 10 }
+        filter: { type: string, nullable: true, description: "Query-language filter (by tag name)." }
+        diversity: { type: number, format: float, default: 0, minimum: 0, maximum: 1 }
+      required: [domain_ids]
+
+    UpdateDocReq:
+      type: object
+      description: "Re-assign labels and/or subdomain. Omitted fields are left unchanged; an empty `subdomain` clears it."
+      properties:
+        labels: { type: array, nullable: true, items: { type: string }, description: "Replacement label names (created if missing)." }
+        tags: { type: array, nullable: true, items: { type: integer, format: int64 }, description: "Replacement existing tag ids." }
+        subdomain: { type: string, nullable: true, description: "New subdomain name; empty string clears it." }
+
+    ReindexReq:
+      type: object
+      properties:
+        model: { type: string, nullable: true, description: "New embedding model; omit to re-embed with the current one." }
+
+    ReindexResp:
+      type: object
+      properties:
+        job_id: { type: integer, format: int64 }
+      required: [job_id]
 
     CreateTagReq:
       type: object
@@ -623,6 +815,19 @@ components:
         display_name: { type: string, nullable: true }
         description: { type: string }
         parent: { type: integer, format: int64, nullable: true }
+      required: [name]
+
+    UpdateTagReq:
+      type: object
+      description: "All fields optional; omitted ones are left unchanged. `name` is immutable (it is the lookup key)."
+      properties:
+        display_name: { type: string, nullable: true }
+        description: { type: string, nullable: true }
+
+    RenameDomainReq:
+      type: object
+      properties:
+        name: { type: string }
       required: [name]
 
     CreateSubdomainReq:
@@ -665,6 +870,7 @@ components:
         scopes: { type: array, items: { $ref: "#/components/schemas/Scope" } }
         created_at: { type: integer, format: int64 }
         expires_at: { type: integer, format: int64, nullable: true }
+        last_used_at: { type: integer, format: int64, nullable: true, description: "Last successful auth (in-memory; null if unused since restart)." }
       required: [id, name, scopes, created_at]
 
     PersistResp:

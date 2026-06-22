@@ -49,6 +49,7 @@ fn req(text: &str, k: usize) -> SearchRequest {
         document_ids: vec![],
         subdomain: None,
         filter: None,
+        diversity: 0.0,
     }
 }
 

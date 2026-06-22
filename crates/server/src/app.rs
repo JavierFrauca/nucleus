@@ -47,10 +47,14 @@ pub struct AppState {
     pub batcher: Option<Arc<EmbedBatcher>>,
     /// Backup catalog + snapshot/restore operations.
     pub backups: Arc<BackupManager>,
+    /// Optional off-site upload command run after each backup (see `backup_sink`).
+    pub backup_upload_cmd: Option<String>,
     /// Embedder used to build a fresh engine on restore.
     pub embedder: Arc<dyn Embedder>,
     /// Index backend for engines built on restore.
     pub index_kind: IndexKind,
+    /// Query-embedding cache capacity, re-applied to engines built on restore.
+    pub query_cache_cap: usize,
     /// Directory where restored database files and the active-db pointer live.
     pub data_dir: PathBuf,
     /// Runtime-adjustable backup schedule.
@@ -70,20 +74,52 @@ pub struct ScheduleConfig {
     pub keep_fulls: usize,
 }
 
+/// Upper bounds (ms) of the search-latency histogram buckets. Cumulative `le`
+/// semantics: an observation counts in every bucket whose bound it is `<=`.
+const LATENCY_BUCKETS_MS: [u64; 11] = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000];
+
 /// Lightweight in-process counters exposed at `/metrics` (Prometheus text).
-#[derive(Default)]
 pub struct Metrics {
     pub search_total: AtomicU64,
     pub search_latency_ms_total: AtomicU64,
     pub search_rejected_total: AtomicU64,
     pub ingest_total: AtomicU64,
     pub ingest_duplicate_total: AtomicU64,
+    /// Cumulative `le` buckets aligned with [`LATENCY_BUCKETS_MS`].
+    search_latency_buckets: [AtomicU64; LATENCY_BUCKETS_MS.len()],
+}
+
+impl Default for Metrics {
+    fn default() -> Self {
+        Self {
+            search_total: AtomicU64::new(0),
+            search_latency_ms_total: AtomicU64::new(0),
+            search_rejected_total: AtomicU64::new(0),
+            ingest_total: AtomicU64::new(0),
+            ingest_duplicate_total: AtomicU64::new(0),
+            search_latency_buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
 }
 
 impl Metrics {
+    /// Record one search of `ms` milliseconds: bumps the total count, the latency
+    /// sum and every histogram bucket whose bound it falls within.
+    pub fn observe_search_latency(&self, ms: u64) {
+        self.search_total.fetch_add(1, Ordering::Relaxed);
+        self.search_latency_ms_total
+            .fetch_add(ms, Ordering::Relaxed);
+        for (i, bound) in LATENCY_BUCKETS_MS.iter().enumerate() {
+            if ms <= *bound {
+                self.search_latency_buckets[i].fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
     pub fn render(&self) -> String {
         let v = |n: &AtomicU64| n.load(Ordering::Relaxed);
-        format!(
+        let count = v(&self.search_total);
+        let mut out = format!(
             "# HELP nucleus_search_total Total search requests served.\n\
              # TYPE nucleus_search_total counter\n\
              nucleus_search_total {}\n\
@@ -99,12 +135,32 @@ impl Metrics {
              # HELP nucleus_ingest_duplicate_total Ingestions skipped as duplicates.\n\
              # TYPE nucleus_ingest_duplicate_total counter\n\
              nucleus_ingest_duplicate_total {}\n",
-            v(&self.search_total),
+            count,
             v(&self.search_latency_ms_total),
             v(&self.search_rejected_total),
             v(&self.ingest_total),
             v(&self.ingest_duplicate_total),
-        )
+        );
+        // Search-latency histogram (Prometheus histogram: cumulative buckets,
+        // then +Inf, _sum and _count).
+        out.push_str(
+            "# HELP nucleus_search_latency_ms Search latency in ms.\n\
+             # TYPE nucleus_search_latency_ms histogram\n",
+        );
+        for (i, bound) in LATENCY_BUCKETS_MS.iter().enumerate() {
+            out.push_str(&format!(
+                "nucleus_search_latency_ms_bucket{{le=\"{}\"}} {}\n",
+                bound,
+                v(&self.search_latency_buckets[i]),
+            ));
+        }
+        out.push_str(&format!(
+            "nucleus_search_latency_ms_bucket{{le=\"+Inf\"}} {count}\n\
+             nucleus_search_latency_ms_sum {}\n\
+             nucleus_search_latency_ms_count {count}\n",
+            v(&self.search_latency_ms_total),
+        ));
+        out
     }
 }
 
@@ -136,6 +192,15 @@ pub struct Config {
     pub embed_batch_window_ms: u64,
     /// Directory where backups (snapshots, deltas, catalog) are stored.
     pub backup_dir: PathBuf,
+    /// Optional command to upload each backup file off-site (e.g. `aws s3 cp {}
+    /// s3://bucket/`). `{}` is replaced by the file path. `None` disables it.
+    pub backup_upload_cmd: Option<String>,
+    /// Query-embedding cache capacity (entries). `0` (default) disables it.
+    pub query_cache_cap: usize,
+    /// Per-client request rate limit (req/s). `0` (default) disables limiting.
+    pub rate_limit_rps: f64,
+    /// Burst capacity for the rate limiter; defaults to `max(rps, 1)`.
+    pub rate_limit_burst: f64,
     /// Scheduled-backup cadence in seconds; `0` disables scheduling.
     pub backup_interval_secs: u64,
     /// Every Nth scheduled backup is a full (the rest differentials).
@@ -219,6 +284,20 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(5),
+            query_cache_cap: env::var("NUCLEUS_QUERY_CACHE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            rate_limit_rps: env::var("NUCLEUS_RATE_LIMIT_RPS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|&n: &f64| n > 0.0)
+                .unwrap_or(0.0),
+            rate_limit_burst: env::var("NUCLEUS_RATE_LIMIT_BURST")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|&n: &f64| n >= 1.0)
+                .unwrap_or(0.0),
             backup_interval_secs: env::var("NUCLEUS_BACKUP_INTERVAL")
                 .ok()
                 .and_then(|v| parse_duration_secs(&v))
@@ -233,6 +312,9 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .filter(|&n: &usize| n > 0)
                 .unwrap_or(7),
+            backup_upload_cmd: env::var("NUCLEUS_BACKUP_UPLOAD_CMD")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
             backup_dir,
             index_dir,
         }

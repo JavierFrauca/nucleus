@@ -2,6 +2,8 @@
 //! the job queue, then serves the REST API.
 
 mod app;
+mod backup_sink;
+mod ratelimit;
 mod routes;
 
 use std::path::PathBuf;
@@ -82,6 +84,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    if cfg.query_cache_cap > 0 {
+        engine.set_query_cache(cfg.query_cache_cap);
+        tracing::info!("query-embedding cache: {} entries", cfg.query_cache_cap);
+    }
+
     // Swappable engine handle, shared by the job queue, handlers and restore.
     let handle = EngineHandle::new(engine);
     let queue = JobQueue::start(handle.clone(), cfg.workers, 3);
@@ -105,7 +112,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         full_every: cfg.backup_full_every,
         keep_fulls: cfg.backup_keep_fulls,
     }));
-    start_backup_scheduler(handle.clone(), backups.clone(), schedule.clone());
+    start_backup_scheduler(
+        handle.clone(),
+        backups.clone(),
+        schedule.clone(),
+        cfg.backup_upload_cmd.clone(),
+    );
 
     tracing::info!(
         "search concurrency limit: {} (wait {} ms); embed batching: {}",
@@ -140,20 +152,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         backups,
         embedder,
         index_kind: cfg.index_kind,
+        query_cache_cap: cfg.query_cache_cap,
+        backup_upload_cmd: cfg.backup_upload_cmd.clone(),
         data_dir,
         schedule,
     };
 
-    let mut app = routes::router(state);
+    // Optional per-client rate limiter (off unless NUCLEUS_RATE_LIMIT_RPS > 0).
+    let rate_limiter = if cfg.rate_limit_rps > 0.0 {
+        let burst = if cfg.rate_limit_burst >= 1.0 {
+            cfg.rate_limit_burst
+        } else {
+            cfg.rate_limit_rps.max(1.0)
+        };
+        tracing::info!(
+            "rate limiting: {} req/s per client (burst {})",
+            cfg.rate_limit_rps,
+            burst
+        );
+        Some(Arc::new(ratelimit::RateLimiter::new(
+            cfg.rate_limit_rps,
+            burst,
+        )))
+    } else {
+        None
+    };
+
+    let mut app = routes::router(state, rate_limiter);
     if cfg.cors_any {
         app = app.layer(tower_http::cors::CorsLayer::permissive());
     }
 
     let listener = tokio::net::TcpListener::bind(&cfg.addr).await?;
     tracing::info!("Nucleus listening on http://{}", cfg.addr);
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(handle_for_shutdown))
-        .await?;
+    // Connect-info makes the client IP available to the rate limiter.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal(handle_for_shutdown))
+    .await?;
     Ok(())
 }
 
@@ -171,13 +209,19 @@ fn start_backup_scheduler(
     handle: Arc<EngineHandle>,
     backups: Arc<BackupManager>,
     schedule: Arc<RwLock<ScheduleConfig>>,
+    upload_cmd: Option<String>,
 ) {
     tokio::spawn(async move {
         let mut count: u64 = 0;
         loop {
             let (enabled, interval, full_every, keep) = {
                 let s = schedule.read().unwrap();
-                (s.enabled, s.interval_secs, s.full_every.max(1), s.keep_fulls)
+                (
+                    s.enabled,
+                    s.interval_secs,
+                    s.full_every.max(1),
+                    s.keep_fulls,
+                )
             };
             if !enabled || interval == 0 {
                 // Disabled: re-check periodically (the schedule may be enabled later).
@@ -207,7 +251,21 @@ fn start_backup_scheduler(
             })
             .await;
             match res {
-                Ok(Ok(rec)) => tracing::info!("scheduled backup {} ({:?})", rec.id, rec.kind),
+                Ok(Ok(rec)) => {
+                    tracing::info!("scheduled backup {} ({:?})", rec.id, rec.kind);
+                    // Best-effort off-site upload; a failure must not stop scheduling.
+                    if let Some(cmd) = &upload_cmd {
+                        let file = backups.file_path(&rec);
+                        let cmd = cmd.clone();
+                        match tokio::task::spawn_blocking(move || backup_sink::upload(&cmd, &file))
+                            .await
+                        {
+                            Ok(Ok(())) => tracing::info!("uploaded backup {}", rec.id),
+                            Ok(Err(e)) => tracing::error!("backup upload failed: {e}"),
+                            Err(e) => tracing::error!("backup upload task panicked: {e}"),
+                        }
+                    }
+                }
                 Ok(Err(e)) => tracing::error!("scheduled backup failed: {e}"),
                 Err(e) => tracing::error!("scheduled backup task panicked: {e}"),
             }

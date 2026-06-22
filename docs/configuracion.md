@@ -9,9 +9,9 @@ valores por defecto razonables.
 | `NUCLEUS_ADDR` | `127.0.0.1:8080` | Dirección y puerto de escucha HTTP. |
 | `NUCLEUS_WORKERS` | `2` | Nº de workers que procesan jobs de ingesta en paralelo. |
 | `NUCLEUS_MODEL_CACHE` | (caché de fastembed) | Directorio donde se descargan/cachean los modelos de embeddings. Conviene fijarlo a una ruta persistente. |
-| `NUCLEUS_INDEX` | `flat` | Backend del índice vectorial: `flat` (exacto) o `hnsw` (aproximado, persistente). |
+| `NUCLEUS_INDEX` | `flat` | Backend del índice vectorial: `flat` (exacto), `sq` (exacto con cuantización escalar int8 → ~4× menos RAM) o `hnsw` (aproximado, persistente). |
 | `NUCLEUS_INDEX_DIR` | `<dir de NUCLEUS_DB>/nucleus_indexes` | Dónde se vuelca/carga el grafo HNSW. |
-| `NUCLEUS_GPU` | `false` | `true` para usar GPU en la inferencia. **Solo efectivo si el binario se compiló con `--features gpu`**; si no, se ignora (CPU). |
+| `NUCLEUS_GPU` | `false` | `true` para usar GPU en la inferencia. **Solo efectivo si el binario se compiló con `--features gpu`** (DirectML, Windows) o **`--features cuda`** (NVIDIA); si no, se ignora (CPU). |
 | `NUCLEUS_ADMIN_TOKEN_FILE` | `<dir BD>/nucleus_admin_token.txt` | Fichero donde se escribe el token admin inicial (no se vuelca a logs). |
 | `NUCLEUS_CORS_ANY` | `false` | `true` permite cualquier origen CORS (clientes en navegador). |
 | `NUCLEUS_RERANK_MODEL` | (vacío → reranking desactivado) | Modelo de *cross-encoder* para reordenar resultados. Valor soportado: `bge-reranker-base`. |
@@ -20,10 +20,14 @@ valores por defecto razonables.
 | `NUCLEUS_SEARCH_WAIT_MS` | `2000` | Cuánto espera una búsqueda un hueco de concurrencia antes de devolver `503` (load-shed). Bájalo (p.ej. 200) para rechazar antes bajo avalancha. |
 | `NUCLEUS_EMBED_BATCH_MAX` | `1` (desactivado) | Agrupa embeddings de consulta en una sola inferencia. **Off por defecto**: en CPU empeora (serializa lo que ya paraleliza). Súbelo (p.ej. 16) solo en GPU. |
 | `NUCLEUS_EMBED_BATCH_WINDOW_MS` | `5` | Ventana para llenar un lote (solo si `NUCLEUS_EMBED_BATCH_MAX > 1`). |
+| `NUCLEUS_QUERY_CACHE` | `0` (desactivado) | Capacidad (entradas) de la **caché LRU de embeddings de consulta**. El embedding de la query es el cuello de CPU; cachearlo acelera consultas repetidas. La inferencia corre fuera del lock. |
+| `NUCLEUS_RATE_LIMIT_RPS` | (vacío → desactivado) | Límite de peticiones por segundo **por cliente** (IP). `0`/ausente lo desactiva. Token-bucket en memoria por nodo; al exceder, `429`. |
+| `NUCLEUS_RATE_LIMIT_BURST` | `max(rps, 1)` | Capacidad de ráfaga del rate limiter (tokens acumulables). Solo aplica si `NUCLEUS_RATE_LIMIT_RPS > 0`. |
 | `NUCLEUS_BACKUP_DIR` | `<dir BD>/nucleus_backups` | Directorio de copias de seguridad (snapshots, deltas y catálogo). |
 | `NUCLEUS_BACKUP_INTERVAL` | (vacío → desactivado) | Cadencia de copias programadas: `30m`, `6h`, `1d`, `2w` o segundos. |
 | `NUCLEUS_BACKUP_FULL_EVERY` | `7` | Cada cuántas copias programadas se hace una **full** (el resto, diferenciales). |
 | `NUCLEUS_BACKUP_KEEP` | `7` | Cuántas copias full (con sus diferenciales) se conservan; el resto se purgan. |
+| `NUCLEUS_BACKUP_UPLOAD_CMD` | (vacío → desactivado) | Comando que sube cada backup **off-site** (S3, etc.) tras crearlo. `{}` se sustituye por la ruta del fichero (si no aparece, se añade al final). Ej.: `aws s3 cp {} s3://bucket/nucleus/`, `rclone copy {} remote:nucleus`. Best-effort: un fallo se registra pero no rompe el backup. |
 | `RUST_LOG` | `info` | Nivel de logs (`tracing`). Ej.: `nucleus_server=info,warn`. |
 
 ## Ejemplos

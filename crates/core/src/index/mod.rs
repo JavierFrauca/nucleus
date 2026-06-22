@@ -14,10 +14,12 @@ use crate::Result;
 mod flat;
 mod hnsw;
 mod lexical;
+mod sq;
 
 pub use flat::FlatIndex;
 pub use hnsw::HnswIndex;
 pub use lexical::LexicalIndex;
+pub use sq::SqFlatIndex;
 
 /// An approximate or exact nearest-neighbour index over chunk embeddings.
 ///
@@ -70,14 +72,18 @@ pub enum IndexKind {
     Flat,
     /// Approximate HNSW — large domains (see [`HnswIndex`] caveats).
     Hnsw,
+    /// Exact-recall brute force with int8 **scalar quantisation** — 4× less RAM
+    /// than `Flat` at a negligible recall cost. See [`SqFlatIndex`].
+    Sq,
 }
 
 impl IndexKind {
-    /// Parse from a config string (`flat` / `hnsw`).
+    /// Parse from a config string (`flat` / `hnsw` / `sq`).
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "flat" => Some(Self::Flat),
             "hnsw" => Some(Self::Hnsw),
+            "sq" | "scalar" => Some(Self::Sq),
             _ => None,
         }
     }
@@ -88,5 +94,6 @@ pub fn build_index(kind: IndexKind, dim: usize) -> Box<dyn VectorIndex> {
     match kind {
         IndexKind::Flat => Box::new(FlatIndex::new(dim)),
         IndexKind::Hnsw => Box::new(HnswIndex::new(dim)),
+        IndexKind::Sq => Box::new(SqFlatIndex::new(dim)),
     }
 }

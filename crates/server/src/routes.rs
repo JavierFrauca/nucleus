@@ -9,8 +9,8 @@ use std::sync::atomic::Ordering;
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::response::{Html, IntoResponse, Response};
+use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -26,7 +26,10 @@ use nucleus_core::storage::Storage;
 use nucleus_core::util::now_millis;
 use nucleus_core::{Engine, NucleusError};
 
+use std::sync::Arc;
+
 use crate::app::{blocking, ApiError, AppState, Auth, ScheduleConfig};
+use crate::ratelimit::RateLimiter;
 
 /// Resolve a subdomain name and label names into ids, creating any that don't
 /// exist yet (turnkey ingest: the caller passes names, not ids).
@@ -54,28 +57,46 @@ fn resolve_structure(
     Ok((sub, tag_ids))
 }
 
-/// Build the application router.
-pub fn router(state: AppState) -> Router {
-    Router::new()
+/// Build the application router. When `rate_limiter` is `Some`, a per-client
+/// token-bucket layer is installed as the outermost middleware.
+pub fn router(state: AppState, rate_limiter: Option<Arc<RateLimiter>>) -> Router {
+    let router = Router::new()
+        .route("/", get(dashboard))
         .route("/healthz", get(health))
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
         .route("/v1/domains", post(create_domain).get(list_domains))
-        .route("/v1/domains/{id}", get(get_domain))
+        .route(
+            "/v1/domains/{id}",
+            get(get_domain).patch(rename_domain).delete(delete_domain),
+        )
         .route(
             "/v1/domains/{id}/documents",
             post(ingest_document).get(list_documents),
         )
+        .route("/v1/domains/{id}/documents/batch", post(ingest_batch))
         .route("/v1/domains/{id}/files", post(upload_file))
         .route("/v1/domains/{id}/search", post(search))
+        .route("/v1/search", post(multi_search))
+        .route("/v1/domains/{id}/reindex", post(reindex_domain))
         .route("/v1/domains/{id}/tags", post(create_tag).get(list_tags))
+        .route(
+            "/v1/domains/{id}/tags/{tag_id}",
+            patch(update_tag).delete(delete_tag),
+        )
         .route(
             "/v1/domains/{id}/subdomains",
             post(create_subdomain).get(list_subdomains),
         )
         .route(
+            "/v1/domains/{id}/subdomains/{sub_id}",
+            delete(delete_subdomain),
+        )
+        .route(
             "/v1/documents/{id}",
-            get(get_document).delete(delete_document),
+            get(get_document)
+                .patch(update_document)
+                .delete(delete_document),
         )
         .route("/v1/chunks/{id}", get(get_chunk))
         .route("/v1/chunks/{id}/context", get(chunk_context))
@@ -83,20 +104,31 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/jobs/{id}", get(get_job))
         .route("/v1/tokens", post(create_token).get(list_tokens))
         .route("/v1/tokens/{id}", delete(delete_token))
+        .route("/v1/tokens/{id}/rotate", post(rotate_token))
         .route("/v1/maintenance/persist", post(persist_indexes))
         .route("/v1/backups", post(create_backup).get(list_backups))
         .route("/v1/backups/restore", post(restore_backup))
-        .route(
-            "/v1/backups/schedule",
-            get(get_schedule).post(set_schedule),
-        )
+        .route("/v1/backups/schedule", get(get_schedule).post(set_schedule))
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024)) // allow large file uploads
-        .layer(TraceLayer::new_for_http())
-        .with_state(state)
+        .layer(TraceLayer::new_for_http());
+    let router = match rate_limiter {
+        Some(rl) => router.layer(axum::middleware::from_fn_with_state(
+            rl,
+            crate::ratelimit::rate_limit,
+        )),
+        None => router,
+    };
+    router.with_state(state)
 }
 
 async fn health() -> &'static str {
     "ok"
+}
+
+/// Self-contained web dashboard (served same-origin, so no CORS needed). The
+/// page is public; all data calls from it carry the user's bearer token.
+async fn dashboard() -> Html<&'static str> {
+    Html(include_str!("dashboard.html"))
 }
 
 /// Readiness: confirms the storage is reachable (cheap query).
@@ -156,6 +188,47 @@ async fn get_domain(
     Ok(Json(domain))
 }
 
+#[derive(Deserialize)]
+struct RenameDomainReq {
+    name: String,
+}
+
+/// Rename a domain (admin).
+async fn rename_domain(
+    State(st): State<AppState>,
+    Auth(ctx): Auth,
+    Path(id): Path<u64>,
+    Json(req): Json<RenameDomainReq>,
+) -> Result<Json<Domain>, ApiError> {
+    if !ctx.is_admin() {
+        return Err(NucleusError::Forbidden.into());
+    }
+    let domain_id = DomainId::new(id);
+    let name = req.name;
+    if name.trim().is_empty() {
+        return Err(NucleusError::invalid("name must not be empty").into());
+    }
+    let engine = st.engine.current();
+    let domain = blocking(move || engine.rename_domain(domain_id, name.trim())).await?;
+    Ok(Json(domain))
+}
+
+/// Delete a domain and everything under it (admin). Idempotent-ish: a missing
+/// domain returns 404.
+async fn delete_domain(
+    State(st): State<AppState>,
+    Auth(ctx): Auth,
+    Path(id): Path<u64>,
+) -> Result<StatusCode, ApiError> {
+    if !ctx.is_admin() {
+        return Err(NucleusError::Forbidden.into());
+    }
+    let domain_id = DomainId::new(id);
+    let engine = st.engine.current();
+    blocking(move || engine.delete_domain(domain_id)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // --- documents & ingest ----------------------------------------------------
 
 #[derive(Deserialize)]
@@ -198,6 +271,16 @@ async fn ingest_document(
     if !ctx.allows(domain_id, Perm::Write) {
         return Err(NucleusError::Forbidden.into());
     }
+    Ok(Json(ingest_one(&st, domain_id, req).await?))
+}
+
+/// Ingest a single document (the shared core of the single and batch endpoints).
+/// Assumes the caller already checked `Write` on `domain_id`.
+async fn ingest_one(
+    st: &AppState,
+    domain_id: DomainId,
+    req: IngestReq,
+) -> Result<IngestResp, ApiError> {
     let IngestReq {
         title,
         source,
@@ -226,11 +309,11 @@ async fn ingest_document(
             st.metrics
                 .ingest_duplicate_total
                 .fetch_add(1, Ordering::Relaxed);
-            return Ok(Json(IngestResp {
+            return Ok(IngestResp {
                 document_id: existing.get(),
                 job_id: 0,
                 duplicate: true,
-            }));
+            });
         }
     }
     let engine = st.engine.current();
@@ -252,11 +335,33 @@ async fn ingest_document(
         blocking(move || e.set_document_hash(domain_id, did, &hash)).await?;
     }
     st.metrics.ingest_total.fetch_add(1, Ordering::Relaxed);
-    Ok(Json(IngestResp {
+    Ok(IngestResp {
         document_id: doc.id.get(),
         job_id: job_id.get(),
         duplicate: false,
-    }))
+    })
+}
+
+/// Batch ingest: an array of documents in one request, each deduplicated
+/// independently. Returns one [`IngestResp`] per item, in order.
+async fn ingest_batch(
+    State(st): State<AppState>,
+    Auth(ctx): Auth,
+    Path(id): Path<u64>,
+    Json(reqs): Json<Vec<IngestReq>>,
+) -> Result<Json<Vec<IngestResp>>, ApiError> {
+    let domain_id = DomainId::new(id);
+    if !ctx.allows(domain_id, Perm::Write) {
+        return Err(NucleusError::Forbidden.into());
+    }
+    if reqs.is_empty() {
+        return Err(NucleusError::invalid("batch must not be empty").into());
+    }
+    let mut out = Vec::with_capacity(reqs.len());
+    for req in reqs {
+        out.push(ingest_one(&st, domain_id, req).await?);
+    }
+    Ok(Json(out))
 }
 
 #[derive(Deserialize)]
@@ -407,6 +512,84 @@ async fn delete_document(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Deserialize)]
+struct UpdateDocReq {
+    /// Replacement label names (created if missing). Combined with `tags`.
+    #[serde(default)]
+    labels: Option<Vec<String>>,
+    /// Replacement existing tag ids. Combined with `labels`.
+    #[serde(default)]
+    tags: Option<Vec<u64>>,
+    /// New subdomain name (created if missing). Empty string clears it; omit to
+    /// leave it unchanged.
+    #[serde(default)]
+    subdomain: Option<String>,
+}
+
+/// Re-assign a document's labels and/or subdomain (propagated to its chunks),
+/// without re-ingesting.
+async fn update_document(
+    State(st): State<AppState>,
+    Auth(ctx): Auth,
+    Path(id): Path<u64>,
+    Json(req): Json<UpdateDocReq>,
+) -> Result<Json<Document>, ApiError> {
+    let doc_id = DocumentId::new(id);
+    let engine = st.engine.current();
+    let doc = {
+        let engine = engine.clone();
+        blocking(move || engine.get_document(doc_id)).await?
+    };
+    if !ctx.allows(doc.domain_id, Perm::Write) {
+        return Err(NucleusError::Forbidden.into());
+    }
+    let domain_id = doc.domain_id;
+
+    // Resolve the replacement tag set (labels by name + tag ids) if any given.
+    let new_tags = if req.labels.is_some() || req.tags.is_some() {
+        let labels = req.labels.unwrap_or_default();
+        let extra = req.tags.unwrap_or_default();
+        let engine = engine.clone();
+        let ids = blocking(move || {
+            let mut v = Vec::new();
+            for l in labels {
+                let l = l.trim();
+                if !l.is_empty() {
+                    v.push(engine.get_or_create_label(domain_id, l)?.id);
+                }
+            }
+            v.extend(extra.into_iter().map(TagId::new));
+            Ok(v)
+        })
+        .await?;
+        Some(ids)
+    } else {
+        None
+    };
+
+    // Resolve the subdomain change (present = set/clear; absent = leave).
+    let (new_subdomain, change_subdomain) = match req.subdomain {
+        None => (None, false),
+        Some(name) => {
+            let name = name.trim().to_string();
+            if name.is_empty() {
+                (None, true) // explicit clear
+            } else {
+                let engine = engine.clone();
+                let sid = blocking(move || engine.get_or_create_subdomain(domain_id, &name, ""))
+                    .await?
+                    .id;
+                (Some(sid), true)
+            }
+        }
+    };
+
+    let updated =
+        blocking(move || engine.update_document(doc_id, new_tags, new_subdomain, change_subdomain))
+            .await?;
+    Ok(Json(updated))
+}
+
 // --- chunks ----------------------------------------------------------------
 
 async fn get_chunk(
@@ -534,16 +717,37 @@ struct SearchReq {
     /// Optional query-language filter, e.g. `tag:legal AND NOT tag:draft`.
     #[serde(default)]
     filter: Option<String>,
+    /// Result diversity (MMR) in `[0, 1]`; `0` (default) keeps pure relevance order.
+    #[serde(default)]
+    diversity: f32,
 }
 
 #[derive(Serialize)]
 struct Hit {
     chunk_id: u64,
     document_id: u64,
+    domain_id: u64,
     score: f32,
     text: String,
+    /// Excerpt centred on the matched query terms (omitted for vector-only queries).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snippet: Option<String>,
     tags: Vec<u64>,
     metadata: BTreeMap<String, String>,
+}
+
+/// Map an engine [`SearchHit`] to the HTTP DTO.
+fn hit_dto(h: nucleus_core::engine::SearchHit) -> Hit {
+    Hit {
+        chunk_id: h.chunk.id.get(),
+        document_id: h.chunk.document_id.get(),
+        domain_id: h.chunk.domain_id.get(),
+        score: h.score,
+        text: h.chunk.text,
+        snippet: h.snippet,
+        tags: h.chunk.tags.into_iter().map(|t| t.get()).collect(),
+        metadata: h.chunk.metadata,
+    }
 }
 
 async fn search(
@@ -596,6 +800,7 @@ async fn run_search(
         document_ids,
         subdomain,
         filter,
+        diversity,
     } = req;
 
     // Resolve the subdomain by name (no creation). An unknown name scopes the
@@ -640,25 +845,96 @@ async fn run_search(
         document_ids: document_ids.into_iter().map(DocumentId::new).collect(),
         subdomain: subdomain_id,
         filter,
+        diversity,
     };
     let started = std::time::Instant::now();
     let engine = st.engine.current();
     let hits = blocking(move || engine.search(domain_id, request)).await?;
-    st.metrics.search_total.fetch_add(1, Ordering::Relaxed);
     st.metrics
-        .search_latency_ms_total
-        .fetch_add(started.elapsed().as_millis() as u64, Ordering::Relaxed);
-    Ok(hits
-        .into_iter()
-        .map(|h| Hit {
-            chunk_id: h.chunk.id.get(),
-            document_id: h.chunk.document_id.get(),
-            score: h.score,
-            text: h.chunk.text,
-            tags: h.chunk.tags.into_iter().map(|t| t.get()).collect(),
-            metadata: h.chunk.metadata,
-        })
-        .collect())
+        .observe_search_latency(started.elapsed().as_millis() as u64);
+    Ok(hits.into_iter().map(hit_dto).collect())
+}
+
+#[derive(Deserialize)]
+struct MultiSearchReq {
+    /// Domains to search; all must share the same embedding model.
+    domain_ids: Vec<u64>,
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    query_vector: Option<Vec<f32>>,
+    #[serde(default = "default_k")]
+    k: usize,
+    #[serde(default)]
+    filter: Option<String>,
+    #[serde(default)]
+    diversity: f32,
+}
+
+/// Search across several domains (same model) in one call. Requires `Read` on
+/// every domain. Per-domain id filters don't apply; use `filter` (by tag name).
+async fn multi_search(
+    State(st): State<AppState>,
+    Auth(ctx): Auth,
+    Json(req): Json<MultiSearchReq>,
+) -> Response {
+    let domain_ids: Vec<DomainId> = req.domain_ids.iter().map(|&i| DomainId::new(i)).collect();
+    if domain_ids.is_empty() {
+        return ApiError::from(NucleusError::invalid("domain_ids must not be empty"))
+            .into_response();
+    }
+    for d in &domain_ids {
+        if !ctx.allows(*d, Perm::Read) {
+            return ApiError::from(NucleusError::Forbidden).into_response();
+        }
+    }
+
+    let permit =
+        match tokio::time::timeout(st.search_wait, st.search_sem.clone().acquire_owned()).await {
+            Ok(Ok(p)) => p,
+            _ => {
+                st.metrics
+                    .search_rejected_total
+                    .fetch_add(1, Ordering::Relaxed);
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({ "error": "server busy, retry shortly" })),
+                )
+                    .into_response();
+            }
+        };
+
+    let query_input = match (req.query_vector, req.query) {
+        (Some(v), _) => QueryInput::Vector(v),
+        (None, Some(text)) => QueryInput::Text(text),
+        (None, None) => {
+            drop(permit);
+            return ApiError::from(NucleusError::invalid("provide `query` or `query_vector`"))
+                .into_response();
+        }
+    };
+    let request = SearchRequest {
+        query: query_input,
+        k: req.k,
+        tags: vec![],
+        match_all: false,
+        document_ids: vec![],
+        subdomain: None,
+        filter: req.filter,
+        diversity: req.diversity,
+    };
+    let started = std::time::Instant::now();
+    let engine = st.engine.current();
+    let result = blocking(move || engine.search_multi(&domain_ids, request)).await;
+    drop(permit);
+    match result {
+        Ok(hits) => {
+            st.metrics
+                .observe_search_latency(started.elapsed().as_millis() as u64);
+            Json(hits.into_iter().map(hit_dto).collect::<Vec<_>>()).into_response()
+        }
+        Err(e) => e.into_response(),
+    }
 }
 
 // --- tags ------------------------------------------------------------------
@@ -712,6 +988,54 @@ async fn list_tags(
     Ok(Json(tags))
 }
 
+#[derive(Deserialize)]
+struct UpdateTagReq {
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+/// Update a label's display name / description.
+async fn update_tag(
+    State(st): State<AppState>,
+    Auth(ctx): Auth,
+    Path((id, tag_id)): Path<(u64, u64)>,
+    Json(req): Json<UpdateTagReq>,
+) -> Result<Json<Tag>, ApiError> {
+    let domain_id = DomainId::new(id);
+    if !ctx.allows(domain_id, Perm::Write) {
+        return Err(NucleusError::Forbidden.into());
+    }
+    let tag_id = TagId::new(tag_id);
+    let UpdateTagReq {
+        display_name,
+        description,
+    } = req;
+    let engine = st.engine.current();
+    let tag = blocking(move || {
+        engine.update_tag(tag_id, display_name.as_deref(), description.as_deref())
+    })
+    .await?;
+    Ok(Json(tag))
+}
+
+/// Delete a label, detaching it from chunks/documents (which survive).
+async fn delete_tag(
+    State(st): State<AppState>,
+    Auth(ctx): Auth,
+    Path((id, tag_id)): Path<(u64, u64)>,
+) -> Result<StatusCode, ApiError> {
+    let domain_id = DomainId::new(id);
+    if !ctx.allows(domain_id, Perm::Write) {
+        return Err(NucleusError::Forbidden.into());
+    }
+    let tag_id = TagId::new(tag_id);
+    let engine = st.engine.current();
+    blocking(move || engine.delete_tag(tag_id)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // --- subdomains ------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -750,6 +1074,22 @@ async fn list_subdomains(
     let engine = st.engine.current();
     let subs = blocking(move || engine.list_subdomains(domain_id)).await?;
     Ok(Json(subs))
+}
+
+/// Delete a subdomain, cascade-deleting its documents.
+async fn delete_subdomain(
+    State(st): State<AppState>,
+    Auth(ctx): Auth,
+    Path((id, sub_id)): Path<(u64, u64)>,
+) -> Result<StatusCode, ApiError> {
+    let domain_id = DomainId::new(id);
+    if !ctx.allows(domain_id, Perm::Write) {
+        return Err(NucleusError::Forbidden.into());
+    }
+    let sub_id = SubdomainId::new(sub_id);
+    let engine = st.engine.current();
+    blocking(move || engine.delete_subdomain(sub_id)).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // --- jobs ------------------------------------------------------------------
@@ -821,6 +1161,8 @@ struct TokenInfo {
     scopes: Vec<Scope>,
     created_at: i64,
     expires_at: Option<i64>,
+    /// Last successful auth (in-memory; null if unused since restart).
+    last_used_at: Option<i64>,
 }
 
 async fn list_tokens(
@@ -832,6 +1174,7 @@ async fn list_tokens(
     }
     let engine = st.engine.current();
     let tokens = blocking(move || engine.list_tokens()).await?;
+    let engine = st.engine.current();
     let out = tokens
         .into_iter()
         .map(|t| TokenInfo {
@@ -840,9 +1183,29 @@ async fn list_tokens(
             scopes: t.scopes,
             created_at: t.created_at,
             expires_at: t.expires_at,
+            last_used_at: engine.token_last_used(t.id),
         })
         .collect();
     Ok(Json(out))
+}
+
+/// Rotate a token's secret (admin). Returns the new plaintext, shown only here.
+async fn rotate_token(
+    State(st): State<AppState>,
+    Auth(ctx): Auth,
+    Path(id): Path<u64>,
+) -> Result<Json<CreateTokenResp>, ApiError> {
+    if !ctx.is_admin() {
+        return Err(NucleusError::Forbidden.into());
+    }
+    let token_id = TokenId::new(id);
+    let engine = st.engine.current();
+    let (token, plaintext) = blocking(move || engine.rotate_token(token_id)).await?;
+    Ok(Json(CreateTokenResp {
+        id: token.id.get(),
+        name: token.name,
+        token: plaintext,
+    }))
 }
 
 async fn delete_token(
@@ -879,6 +1242,42 @@ async fn persist_indexes(
     Ok(Json(PersistResp { persisted }))
 }
 
+#[derive(Deserialize)]
+struct ReindexReq {
+    /// New embedding model; omit to re-embed with the domain's current model.
+    #[serde(default)]
+    model: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ReindexResp {
+    job_id: u64,
+}
+
+/// Re-embed a domain (optionally switching model) and rebuild its index, as a
+/// background job. Admin only.
+async fn reindex_domain(
+    State(st): State<AppState>,
+    Auth(ctx): Auth,
+    Path(id): Path<u64>,
+    Json(req): Json<ReindexReq>,
+) -> Result<Json<ReindexResp>, ApiError> {
+    if !ctx.is_admin() {
+        return Err(NucleusError::Forbidden.into());
+    }
+    let domain_id = DomainId::new(id);
+    let model = req.model.filter(|m| !m.trim().is_empty());
+    if let Some(m) = &model {
+        if !st.engine.current().supports_model(m) {
+            return Err(NucleusError::ModelNotFound(m.clone()).into());
+        }
+    }
+    let job_id = st.queue.enqueue_reindex(domain_id, model)?;
+    Ok(Json(ReindexResp {
+        job_id: job_id.get(),
+    }))
+}
+
 // --- backups ---------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -900,9 +1299,7 @@ async fn create_backup(
     let kind = match req.kind.as_deref().unwrap_or("full") {
         "full" => BackupKind::Full,
         "differential" | "diff" => BackupKind::Differential,
-        other => {
-            return Err(NucleusError::invalid(format!("unknown backup kind: {other}")).into())
-        }
+        other => return Err(NucleusError::invalid(format!("unknown backup kind: {other}")).into()),
     };
     let engine = st.engine.current();
     let backups = st.backups.clone();
@@ -916,7 +1313,27 @@ async fn create_backup(
         Ok(rec)
     })
     .await?;
+    // Best-effort off-site upload (e.g. to S3) if configured.
+    if let Some(cmd) = &st.backup_upload_cmd {
+        let file = st.backups.file_path(&rec);
+        let cmd = cmd.clone();
+        if let Ok(Err(e)) = blocking_io(move || crate::backup_sink::upload(&cmd, &file)).await {
+            tracing::error!("backup upload failed: {e}");
+        }
+    }
     Ok(Json(rec))
+}
+
+/// Run a blocking closure on the blocking pool (for non-engine work like an
+/// upload subprocess), returning its `Result` and mapping a join failure.
+async fn blocking_io<T, F>(f: F) -> Result<T, ApiError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| ApiError(NucleusError::embedding_msg(format!("task failed: {e}"))))
 }
 
 /// List the backup catalog (admin).
@@ -980,9 +1397,14 @@ async fn restore_backup(
     let kind = st.index_kind;
     let index_dir = st.data_dir.join(format!("indexes-restored-{ts}"));
     let db_for_open = new_db.clone();
+    let cache_cap = st.query_cache_cap;
     let new_engine = blocking(move || {
         let storage = Storage::open(&db_for_open)?;
-        Engine::open(storage, embedder, kind, Some(index_dir))
+        let engine = Engine::open(storage, embedder, kind, Some(index_dir))?;
+        if cache_cap > 0 {
+            engine.set_query_cache(cache_cap);
+        }
+        Ok(engine)
     })
     .await?;
     st.engine.swap(std::sync::Arc::new(new_engine));
@@ -1024,8 +1446,7 @@ async fn set_schedule(
     if !ctx.is_admin() {
         return Err(NucleusError::Forbidden.into());
     }
-    *st
-        .schedule
+    *st.schedule
         .write()
         .map_err(|_| NucleusError::invalid("schedule lock poisoned"))? = cfg.clone();
     Ok(Json(cfg))
@@ -1076,8 +1497,10 @@ mod tests {
                 std::time::Duration::from_millis(5),
             ))),
             backups,
+            backup_upload_cmd: None,
             embedder,
             index_kind: nucleus_core::index::IndexKind::Flat,
+            query_cache_cap: 0,
             data_dir: dir.path().to_path_buf(),
             schedule: std::sync::Arc::new(std::sync::RwLock::new(crate::app::ScheduleConfig {
                 enabled: false,
@@ -1088,7 +1511,7 @@ mod tests {
         };
         (
             Harness {
-                app: router(state),
+                app: router(state, None),
                 token,
             },
             dir,
@@ -1297,28 +1720,262 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dashboard_is_served_at_root() {
+        let (h, _dir) = harness();
+        let req = Request::builder()
+            .method("GET")
+            .uri("/")
+            .body(Body::empty())
+            .unwrap();
+        let resp = h.app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(ct.contains("text/html"));
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&body).contains("Nucleus"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn batch_ingest_multidomain_search_and_doc_patch() {
+        let (h, _dir) = harness();
+
+        let (_, dom) = call(
+            &h.app,
+            "POST",
+            "/v1/domains",
+            &h.token,
+            json!({"name":"docs"}),
+        )
+        .await;
+        let did = dom["id"].as_u64().unwrap();
+
+        // Batch-ingest two documents.
+        let (status, batch) = call(
+            &h.app,
+            "POST",
+            &format!("/v1/domains/{did}/documents/batch"),
+            &h.token,
+            json!([
+                {"title":"a","chunks":["el contrato laboral indefinido"]},
+                {"title":"b","chunks":["receta de pizza con piña"]}
+            ]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let items = batch.as_array().unwrap();
+        assert_eq!(items.len(), 2);
+
+        // Wait for both ingest jobs.
+        for it in items {
+            let job_id = it["job_id"].as_u64().unwrap();
+            let mut done = false;
+            for _ in 0..200 {
+                let (_, j) = call(
+                    &h.app,
+                    "GET",
+                    &format!("/v1/jobs/{job_id}"),
+                    &h.token,
+                    json!({}),
+                )
+                .await;
+                if j["status"] == "Done" {
+                    done = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            assert!(done, "batch job did not finish");
+        }
+
+        // Multi-domain search (single domain here) returns hits with domain_id + snippet.
+        let (status, hits) = call(
+            &h.app,
+            "POST",
+            "/v1/search",
+            &h.token,
+            json!({"domain_ids":[did], "query":"contrato laboral", "k":5}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let arr = hits.as_array().unwrap();
+        assert!(!arr.is_empty());
+        assert_eq!(arr[0]["domain_id"].as_u64().unwrap(), did);
+        assert!(arr[0]["text"].as_str().unwrap().contains("contrato"));
+        assert!(arr[0]["snippet"].as_str().unwrap().contains("contrato"));
+
+        // PATCH the first document: attach a label by name.
+        let doc_id = arr[0]["document_id"].as_u64().unwrap();
+        let (status, _) = call(
+            &h.app,
+            "PATCH",
+            &format!("/v1/documents/{doc_id}"),
+            &h.token,
+            json!({"labels":["revisado"]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, doc) = call(
+            &h.app,
+            "GET",
+            &format!("/v1/documents/{doc_id}"),
+            &h.token,
+            json!({}),
+        )
+        .await;
+        assert_eq!(doc["tags"].as_array().unwrap().len(), 1);
+
+        // Reindex the domain (same model) — returns a job id.
+        let (status, rx) = call(
+            &h.app,
+            "POST",
+            &format!("/v1/domains/{did}/reindex"),
+            &h.token,
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(rx["job_id"].as_u64().unwrap() > 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn crud_update_and_cascade_delete() {
+        let (h, _dir) = harness();
+
+        // Domain + tag + subdomain via ingest.
+        let (_, dom) = call(
+            &h.app,
+            "POST",
+            "/v1/domains",
+            &h.token,
+            json!({"name":"docs"}),
+        )
+        .await;
+        let domain_id = dom["id"].as_u64().unwrap();
+        let (_, tag) = call(
+            &h.app,
+            "POST",
+            &format!("/v1/domains/{domain_id}/tags"),
+            &h.token,
+            json!({"name":"legal"}),
+        )
+        .await;
+        let tag_id = tag["id"].as_u64().unwrap();
+
+        // PATCH the tag's display name.
+        let (status, updated) = call(
+            &h.app,
+            "PATCH",
+            &format!("/v1/domains/{domain_id}/tags/{tag_id}"),
+            &h.token,
+            json!({"display_name":"Legal Docs"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(updated["display_name"], "Legal Docs");
+
+        // Rename the domain.
+        let (status, renamed) = call(
+            &h.app,
+            "PATCH",
+            &format!("/v1/domains/{domain_id}"),
+            &h.token,
+            json!({"name":"renamed"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(renamed["name"], "renamed");
+
+        // Delete the tag (204).
+        let (status, _) = call(
+            &h.app,
+            "DELETE",
+            &format!("/v1/domains/{domain_id}/tags/{tag_id}"),
+            &h.token,
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, tags) = call(
+            &h.app,
+            "GET",
+            &format!("/v1/domains/{domain_id}/tags"),
+            &h.token,
+            json!({}),
+        )
+        .await;
+        assert!(tags.as_array().unwrap().is_empty());
+
+        // Delete the whole domain (204), then it's gone (404).
+        let (status, _) = call(
+            &h.app,
+            "DELETE",
+            &format!("/v1/domains/{domain_id}"),
+            &h.token,
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, _) = call(
+            &h.app,
+            "GET",
+            &format!("/v1/domains/{domain_id}"),
+            &h.token,
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn backup_list_restore_and_schedule() {
         let (h, _dir) = harness();
 
         // Domain that exists at backup time.
-        let (status, dom) =
-            call(&h.app, "POST", "/v1/domains", &h.token, json!({"name":"docs"})).await;
+        let (status, dom) = call(
+            &h.app,
+            "POST",
+            "/v1/domains",
+            &h.token,
+            json!({"name":"docs"}),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         let _ = dom["id"].as_u64().unwrap();
 
         // Full backup.
-        let (status, rec) =
-            call(&h.app, "POST", "/v1/backups", &h.token, json!({"kind":"full"})).await;
+        let (status, rec) = call(
+            &h.app,
+            "POST",
+            "/v1/backups",
+            &h.token,
+            json!({"kind":"full"}),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         let backup_id = rec["id"].as_str().unwrap().to_string();
 
         // The catalog lists it.
         let (status, list) = call(&h.app, "GET", "/v1/backups", &h.token, json!({})).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(list.as_array().unwrap().iter().any(|r| r["id"] == backup_id));
+        assert!(list
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["id"] == backup_id));
 
         // Create a SECOND domain AFTER the backup.
-        let _ = call(&h.app, "POST", "/v1/domains", &h.token, json!({"name":"after"})).await;
+        let _ = call(
+            &h.app,
+            "POST",
+            "/v1/domains",
+            &h.token,
+            json!({"name":"after"}),
+        )
+        .await;
         let (_s, before) = call(&h.app, "GET", "/v1/domains", &h.token, json!({})).await;
         assert_eq!(before.as_array().unwrap().len(), 2);
 

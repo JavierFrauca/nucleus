@@ -43,6 +43,12 @@ pub enum JobKind {
     },
     /// Delete a document and its chunks.
     DeleteDocument { document_id: DocumentId },
+    /// Re-embed a domain (optionally with a new model) and rebuild its index.
+    Reindex {
+        domain_id: DomainId,
+        /// New embedding model, or `None` to re-embed with the current one.
+        model: Option<String>,
+    },
 }
 
 /// Lifecycle of a job.
@@ -125,8 +131,14 @@ impl JobQueue {
         body: JobBody,
     ) -> Result<(Document, JobId)> {
         let engine = self.handle.current();
-        let doc =
-            engine.create_document_record(domain_id, subdomain_id, title, source, metadata, tags)?;
+        let doc = engine.create_document_record(
+            domain_id,
+            subdomain_id,
+            title,
+            source,
+            metadata,
+            tags,
+        )?;
         let job = engine.storage().create_job(JobKind::Ingest {
             document_id: doc.id,
             body,
@@ -142,6 +154,17 @@ impl JobQueue {
         let job = engine
             .storage()
             .create_job(JobKind::DeleteDocument { document_id })?;
+        self.notify.notify_waiters();
+        Ok(job.id)
+    }
+
+    /// Enqueue a domain reindex (re-embed all chunks, optionally with `model`).
+    pub fn enqueue_reindex(&self, domain_id: DomainId, model: Option<String>) -> Result<JobId> {
+        let engine = self.handle.current();
+        engine.get_domain(domain_id)?; // 404 fast if missing
+        let job = engine
+            .storage()
+            .create_job(JobKind::Reindex { domain_id, model })?;
         self.notify.notify_waiters();
         Ok(job.id)
     }
@@ -197,6 +220,10 @@ fn run_job(engine: &Engine, job: Job) -> Result<()> {
             Ok(())
         }
         JobKind::DeleteDocument { document_id } => engine.delete_document(document_id),
+        JobKind::Reindex { domain_id, model } => {
+            engine.reindex_domain(domain_id, model.as_deref())?;
+            Ok(())
+        }
     }
 }
 
@@ -251,6 +278,7 @@ mod tests {
                     document_ids: vec![],
                     subdomain: None,
                     filter: None,
+                    diversity: 0.0,
                 },
             )
             .unwrap();

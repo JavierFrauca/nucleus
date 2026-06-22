@@ -65,6 +65,13 @@ demo headless de Node, y un mini-front de navegador con 2 pantallas (ingesta y b
   **restore en caliente** (swap del motor). Ver [operación](docs/operacion.md#backups-y-restauración).
 - **API HTTP** con axum.
 
+## Panel web
+
+El servidor sirve un **dashboard** autocontenido en `GET /` (mismo origen, sin
+CORS): pega tu token y crea dominios, ingesta texto o ficheros, busca (con
+*snippets*, *score* y control de diversidad MMR) y ves los jobs. Abre
+`http://127.0.0.1:8080/` tras arrancar.
+
 ## Arquitectura
 
 ```
@@ -100,7 +107,8 @@ crates/
 cargo build            # workspace
 cargo test --workspace # 37 tests (core + e2e HTTP con MockEmbedder)
 cargo clippy --workspace --all-targets
-cargo build --features gpu  # opcional: inferencia por GPU (ONNX DirectML)
+cargo build --features gpu   # opcional: inferencia por GPU (ONNX DirectML, Windows)
+cargo build --features cuda  # opcional: inferencia por GPU NVIDIA (ONNX CUDA)
 
 # Docker (multi-stage; ver Dockerfile)
 docker build -t nucleus .
@@ -135,8 +143,10 @@ Al primer arranque, si no hay tokens, se imprime **una sola vez** un token admin
 ```
 
 > La primera ingesta/búsqueda **descarga el modelo** de HuggingFace
-> (`multilingual-e5-small`, ~450 MB) y lo cachea. Requiere red e espacio en disco esa
-> primera vez.
+> (`multilingual-e5-small`, ~450 MB) y lo cachea. Requiere red y espacio en disco esa
+> primera vez. **La imagen Docker ya trae el modelo precacheado** (build con
+> `PREFETCH_MODEL=true`, por defecto), así que el primer arranque no descarga nada;
+> usa `--build-arg PREFETCH_MODEL=false` para builds sin red.
 
 ## API
 
@@ -148,20 +158,30 @@ Todas las rutas (salvo `/healthz`) requieren `Authorization: Bearer <token>`.
 | `POST /v1/domains`                     | Admin    | Crear dominio                        |
 | `GET /v1/domains`                      | auth     | Listar dominios                      |
 | `GET /v1/domains/{id}`                 | Read     | Obtener dominio                      |
+| `PATCH /v1/domains/{id}`               | Admin    | Renombrar dominio                    |
+| `DELETE /v1/domains/{id}`              | Admin    | Borrar dominio (cascada total)       |
 | `POST /v1/domains/{id}/documents`      | Write    | Ingestar documento (asíncrono)       |
-| `POST /v1/domains/{id}/search`         | Read     | **Buscar chunks**                    |
+| `POST /v1/domains/{id}/documents/batch`| Write    | Ingestar varios documentos (array)   |
+| `POST /v1/domains/{id}/reindex`        | Admin    | Reindexar/cambiar modelo (job)       |
+| `POST /v1/domains/{id}/search`         | Read     | **Buscar chunks** (`diversity` opc.) |
+| `POST /v1/search`                      | Read     | Buscar en varios dominios (mismo modelo) |
 | `POST /v1/domains/{id}/tags`           | Write    | Crear etiqueta (label)               |
 | `GET /v1/domains/{id}/tags`            | Read     | Listar etiquetas                     |
+| `PATCH /v1/domains/{id}/tags/{tag}`    | Write    | Editar etiqueta (display/desc)       |
+| `DELETE /v1/domains/{id}/tags/{tag}`   | Write    | Borrar etiqueta (la desasocia)       |
 | `POST /v1/domains/{id}/subdomains`     | Write    | Crear subdominio                     |
 | `GET /v1/domains/{id}/subdomains`      | Read     | Listar subdominios                   |
+| `DELETE /v1/domains/{id}/subdomains/{sub}` | Write | Borrar subdominio (cascada docs)    |
 | `GET /v1/documents/{id}`               | Read     | Obtener documento                    |
+| `PATCH /v1/documents/{id}`             | Write    | Re-etiquetar / mover de subdominio    |
 | `DELETE /v1/documents/{id}`            | Write    | Borrar documento + chunks            |
 | `GET /v1/chunks/{id}`                  | Read     | Obtener un chunk                     |
 | `GET /v1/chunks/{id}/context`          | Read     | Chunk + vecinos (`?before=&after=`)  |
 | `GET /v1/jobs/{id}`                    | auth     | Estado de un job                     |
 | `POST /v1/tokens`                      | Admin    | Crear token                          |
-| `GET /v1/tokens`                       | Admin    | Listar tokens                        |
+| `GET /v1/tokens`                       | Admin    | Listar tokens (con `last_used_at`)   |
 | `DELETE /v1/tokens/{id}`               | Admin    | Borrar token                         |
+| `POST /v1/tokens/{id}/rotate`          | Admin    | Rotar el secreto de un token         |
 | `POST /v1/maintenance/persist`         | Admin    | Volcar los índices HNSW a disco      |
 
 ### Ejemplo (curl)
@@ -317,6 +337,14 @@ Dockerfile y CI.
 
 ## Próximos pasos
 
-- **Calidad (foso)**: **auto-inducción** de subdominios/labels (clustering + reglas, sin LLM).
-- **Operación**: borrado en cascada de dominios/subdominios/labels; rate limiting.
-- **Escala**: mmap del grafo HNSW; workers de jobs distribuidos; multi-nodo si SaaS.
+El roadmap completo —priorizado por ejes (calidad, operación, escala, API,
+ingesta) y con el estado de cada ítem— vive en su propio documento:
+**[docs/roadmap.md](docs/roadmap.md)**.
+
+Implementado: chunking por frontera de frase, **diversidad (MMR)**, **snippets**,
+**pre-filtrado HNSW adaptativo**, **reindexado/cambio de modelo**, borrado en
+cascada y updates, **PATCH de documento** (re-etiquetar/mover), **búsqueda
+multi-dominio**, **ingesta por lotes**, **rate limiting**, **rotación de tokens +
+last_used** e **histograma de latencia** en `/metrics`. Diferidos (con su porqué
+en el roadmap): OCR, backups en S3, cuantización PQ, mmap de HNSW, OpenTelemetry,
+webhooks, auto-inducción de labels y multi-nodo.

@@ -305,7 +305,9 @@ Detalle no obvio: una build **dev** (sin optimizar) hace la búsqueda ~10× más
   embedding o modelo más ligero (ni batching ni más pools ayudan, está medido).
 - **Reranking** es lento en CPU (~150 ms/candidato); la GPU AMD probada (DirectML) **no** ayudó.
 - **`.doc` binario heredado** no soportado (sí `.docx`); algunos PDF cifrados fallan al extraer.
-- **Chunker** de tamaño fijo corta a mitad de palabra; chunking por frase mejoraría.
+- **Chunker**: la ventana es de tamaño fijo pero ahora **respeta fronteras** (retrocede
+  al último fin de frase/espacio dentro de la ventana), evitando cortes a mitad de palabra;
+  un troceado plenamente semántico (por estructura del documento) seguiría mejorando.
 - **Restore** cambia el nombre físico del DB (puntero `active_db.txt`); backups locales (sin S3).
 - Madurez operativa joven frente a productos con años (observabilidad, tuning).
 
@@ -333,7 +335,7 @@ características conocidas, no medidas en el mismo banco.)
 - Ingesta: 50 docs / **15.732 chunks** en **~1.083 s** (dominado por pocos PDFs grandes).
 - Reranking: **~150 ms/candidato** CPU; cota 20 ≈ +2,4 s, cota 50 ≈ +7,5 s. GPU DirectML no ayudó.
 - Diferencial: 476 B vs full 3,7 MB. Imagen Docker 197 MB; exe Windows 32 MB autocontenido.
-- MSRV: Rust **1.82** (usa `Option::is_none_or`). ~49 tests (47 core + 2 e2e), clippy `-D warnings` limpio.
+- MSRV: Rust **1.82** (usa `Option::is_none_or`). ~59 tests (54 core + 5 server/e2e), clippy `-D warnings` limpio.
 
 ---
 

@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Nucleus — panel</title>
+<style>
+  :root {
+    --bg: #0f172a; --panel: #1e293b; --line: #334155; --text: #e2e8f0;
+    --muted: #94a3b8; --accent: #38bdf8; --accent2: #22d3ee; --ok: #34d399; --bad: #f87171;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.5 system-ui, sans-serif; background: var(--bg); color: var(--text); }
+  header { display: flex; align-items: center; gap: 12px; padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 5; }
+  header h1 { font-size: 17px; margin: 0; letter-spacing: .5px; }
+  header .badge { font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; }
+  header .spacer { flex: 1; }
+  header input { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px; width: 280px; }
+  main { max-width: 1100px; margin: 18px auto; padding: 0 16px; display: grid; grid-template-columns: 300px 1fr; gap: 16px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-bottom: 16px; }
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin: 0 0 10px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 3px; }
+  input, textarea, select { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 8px 9px; font: inherit; }
+  textarea { min-height: 90px; resize: vertical; }
+  button { background: var(--accent); color: #07121f; border: 0; border-radius: 6px; padding: 8px 12px; font-weight: 600; cursor: pointer; }
+  button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--line); }
+  button:disabled { opacity: .5; cursor: default; }
+  .row { display: flex; gap: 8px; align-items: end; }
+  .row > * { flex: 1; }
+  .dom { display: flex; justify-content: space-between; align-items: center; padding: 7px 9px; border-radius: 6px; cursor: pointer; }
+  .dom:hover { background: var(--bg); }
+  .dom.active { background: var(--bg); outline: 1px solid var(--accent); }
+  .dom small { color: var(--muted); }
+  .hit { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 8px 0; }
+  .hit .top { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; }
+  .hit .score { color: var(--accent2); font-weight: 700; }
+  .hit .snippet { margin-top: 6px; }
+  .hit mark { background: rgba(56,189,248,.25); color: inherit; padding: 0 2px; border-radius: 3px; }
+  .tags span { display: inline-block; background: var(--bg); border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; font-size: 11px; color: var(--muted); margin: 4px 4px 0 0; }
+  .job { display: flex; justify-content: space-between; font-size: 12px; padding: 4px 0; border-bottom: 1px solid var(--line); }
+  .pill { font-size: 11px; border-radius: 999px; padding: 1px 8px; }
+  .pill.Done { background: rgba(52,211,153,.18); color: var(--ok); }
+  .pill.Failed { background: rgba(248,113,113,.18); color: var(--bad); }
+  .pill.Pending, .pill.Running { background: rgba(56,189,248,.18); color: var(--accent); }
+  #toast { position: fixed; bottom: 18px; right: 18px; background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 8px; padding: 10px 14px; max-width: 360px; opacity: 0; transition: opacity .2s; }
+  #toast.show { opacity: 1; }
+  #toast.err { border-left-color: var(--bad); }
+  .muted { color: var(--muted); font-size: 12px; }
+  .range { display: flex; align-items: center; gap: 8px; }
+  .range input { flex: 1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>◆ Nucleus</h1>
+  <span class="badge" id="status">desconectado</span>
+  <div class="spacer"></div>
+  <input id="token" type="password" placeholder="Bearer token (nuc_…)" />
+  <button id="connect">Conectar</button>
+</header>
+
+<main>
+  <div>
+    <div class="card">
+      <h2>Dominios</h2>
+      <div id="domains"><div class="muted">Conecta para listar.</div></div>
+      <div class="row" style="margin-top:10px">
+        <input id="newDomain" placeholder="nuevo dominio" />
+        <button class="ghost" id="createDomain" style="flex:0 0 auto">+ crear</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Jobs recientes</h2>
+      <div id="jobs"><div class="muted">—</div></div>
+    </div>
+  </div>
+
+  <div>
+    <div class="card">
+      <h2>Buscar <span id="activeDom" class="muted"></span></h2>
+      <input id="q" placeholder="consulta…" />
+      <div class="row" style="margin-top:8px">
+        <div><label>k</label><input id="k" type="number" value="5" min="1" /></div>
+        <div><label>diversidad (MMR): <span id="divVal">0</span></label>
+          <div class="range"><input id="diversity" type="range" min="0" max="1" step="0.1" value="0" /></div></div>
+        <div style="flex:0 0 auto"><label>&nbsp;</label><button id="search">Buscar</button></div>
+      </div>
+      <div id="results"></div>
+    </div>
+
+    <div class="card">
+      <h2>Ingestar</h2>
+      <div class="row">
+        <div><label>título</label><input id="title" placeholder="título" /></div>
+        <div><label>subdominio (opcional)</label><input id="subdomain" placeholder="p.ej. irpf" /></div>
+        <div><label>labels (coma)</label><input id="labels" placeholder="2026, fiscal" /></div>
+      </div>
+      <label>texto</label>
+      <textarea id="text" placeholder="pega el texto del documento…"></textarea>
+      <div class="row">
+        <button id="ingest">Ingestar texto</button>
+        <div style="flex:2">
+          <label>…o subir fichero (pdf, docx, md, txt, html, xlsx)</label>
+          <input id="file" type="file" />
+        </div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<div id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let TOKEN = "";
+let DOMAINS = [];
+let ACTIVE = null;
+
+function toast(msg, err) {
+  const t = $("toast"); t.textContent = msg; t.className = "show" + (err ? " err" : "");
+  setTimeout(() => (t.className = ""), 3200);
+}
+async function api(method, path, body, isForm) {
+  const opt = { method, headers: { authorization: "Bearer " + TOKEN } };
+  if (body && !isForm) { opt.headers["content-type"] = "application/json"; opt.body = JSON.stringify(body); }
+  if (body && isForm) opt.body = body;
+  const r = await fetch(path, opt);
+  const txt = await r.text();
+  const data = txt ? (() => { try { return JSON.parse(txt); } catch { return txt; } })() : null;
+  if (!r.ok) throw new Error((data && data.error) || r.status + " " + r.statusText);
+  return data;
+}
+function esc(s) { return (s || "").replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+
+async function connect() {
+  TOKEN = $("token").value.trim();
+  if (!TOKEN) return toast("Introduce un token", true);
+  try {
+    await refreshDomains();
+    $("status").textContent = "conectado"; $("status").style.color = "var(--ok)";
+    toast("Conectado");
+    refreshJobs();
+  } catch (e) { $("status").textContent = "error"; toast(e.message, true); }
+}
+
+async function refreshDomains() {
+  DOMAINS = await api("GET", "/v1/domains");
+  const box = $("domains"); box.innerHTML = "";
+  if (!DOMAINS.length) box.innerHTML = '<div class="muted">Sin dominios todavía.</div>';
+  for (const d of DOMAINS) {
+    const el = document.createElement("div");
+    el.className = "dom" + (ACTIVE === d.id ? " active" : "");
+    el.innerHTML = `<span>${esc(d.name)}</span><small>#${d.id} · ${esc(d.model)}</small>`;
+    el.onclick = () => { ACTIVE = d.id; setActive(); refreshDomains(); };
+    box.appendChild(el);
+  }
+  if (ACTIVE === null && DOMAINS.length) { ACTIVE = DOMAINS[0].id; }
+  setActive();
+}
+function setActive() {
+  const d = DOMAINS.find(x => x.id === ACTIVE);
+  $("activeDom").textContent = d ? "· " + d.name : "";
+}
+
+async function createDomain() {
+  const name = $("newDomain").value.trim(); if (!name) return;
+  try { const d = await api("POST", "/v1/domains", { name }); $("newDomain").value = ""; ACTIVE = d.id; await refreshDomains(); toast("Dominio creado"); }
+  catch (e) { toast(e.message, true); }
+}
+
+async function ingest() {
+  if (ACTIVE === null) return toast("Elige un dominio", true);
+  const body = {
+    title: $("title").value.trim() || "documento",
+    text: $("text").value,
+    subdomain: $("subdomain").value.trim() || undefined,
+    labels: $("labels").value.split(",").map(s => s.trim()).filter(Boolean),
+  };
+  if (!body.text) return toast("Escribe texto o sube un fichero", true);
+  try { const r = await api("POST", `/v1/domains/${ACTIVE}/documents`, body); toast(r.duplicate ? "Duplicado (ya estaba)" : "Ingestado, job #" + r.job_id); $("text").value = ""; refreshJobs(); }
+  catch (e) { toast(e.message, true); }
+}
+
+async function uploadFile() {
+  if (ACTIVE === null) return toast("Elige un dominio", true);
+  const f = $("file").files[0]; if (!f) return;
+  const labels = encodeURIComponent($("labels").value.trim());
+  const sub = encodeURIComponent($("subdomain").value.trim());
+  const qs = `filename=${encodeURIComponent(f.name)}` + (labels ? `&labels=${labels}` : "") + (sub ? `&subdomain=${sub}` : "");
+  try { const r = await api("POST", `/v1/domains/${ACTIVE}/files?${qs}`, f, true); toast(r.duplicate ? "Duplicado" : `Subido (${r.chars} chars), job #${r.job_id}`); $("file").value = ""; refreshJobs(); }
+  catch (e) { toast(e.message, true); }
+}
+
+function highlight(text, snippet) {
+  if (snippet) return esc(snippet).replace(/…/g, '<span class="muted">…</span>');
+  return esc((text || "").slice(0, 240));
+}
+async function search() {
+  if (ACTIVE === null) return toast("Elige un dominio", true);
+  const body = { query: $("q").value, k: +$("k").value || 5, diversity: +$("diversity").value || 0 };
+  if (!body.query) return;
+  try {
+    const hits = await api("POST", `/v1/domains/${ACTIVE}/search`, body);
+    const box = $("results"); box.innerHTML = "";
+    if (!hits.length) { box.innerHTML = '<div class="muted">Sin resultados.</div>'; return; }
+    for (const h of hits) {
+      const el = document.createElement("div"); el.className = "hit";
+      const tags = (h.tags || []).map(t => `<span>#${t}</span>`).join("");
+      el.innerHTML = `<div class="top"><span>doc #${h.document_id} · chunk #${h.chunk_id}</span><span class="score">${h.score.toFixed(3)}</span></div>
+        <div class="snippet">${highlight(h.text, h.snippet)}</div>
+        <div class="tags">${tags}</div>`;
+      box.appendChild(el);
+    }
+  } catch (e) { toast(e.message, true); }
+}
+
+async function refreshJobs() {
+  try {
+    const jobs = await api("GET", "/v1/jobs?limit=8");
+    const box = $("jobs"); box.innerHTML = "";
+    if (!jobs.length) { box.innerHTML = '<div class="muted">—</div>'; return; }
+    for (const j of jobs.reverse()) {
+      const el = document.createElement("div"); el.className = "job";
+      el.innerHTML = `<span>job #${j.id}</span><span class="pill ${j.status}">${j.status}</span>`;
+      box.appendChild(el);
+    }
+  } catch { /* jobs require admin; ignore for read-only tokens */ }
+}
+
+$("connect").onclick = connect;
+$("createDomain").onclick = createDomain;
+$("ingest").onclick = ingest;
+$("file").onchange = uploadFile;
+$("search").onclick = search;
+$("q").addEventListener("keydown", e => { if (e.key === "Enter") search(); });
+$("diversity").oninput = e => ($("divVal").textContent = e.target.value);
+$("token").addEventListener("keydown", e => { if (e.key === "Enter") connect(); });
+</script>
+</body>
+</html>
