@@ -43,5 +43,5 @@ cross-encoder · jobs en redb + tokio · auth API-key con scopes · qbsdiff (bac
 ### Respuestas rápido
 - *¿Se corrompe con concurrencia?* No: 0 incorrectos medidos; redb serializa escritura, lecturas concurrentes, `parking_lot`.
 - *¿Backup consistente sin parar?* Copia lógica sobre read-txn de redb (MVCC) → snapshot point-in-time.
-- *¿Por qué no Qdrant/SQL Server?* Ellos no embeben ni extraen; la comparativa justa es end-to-end (embed+buscar), donde Nucleus no paga salto de red.
+- *¿Por qué no Qdrant/SQL Server?* Son bases vectoriales/RDBMS sin el pipeline de ingesta (extracción + chunking) integrado; Nucleus es el motor end-to-end listo para producir, sin montar tubería propia.
 - *¿Y si se cae a media ingesta?* Jobs durables (se re-encolan al arrancar); redb ACID, `kill -9` no corrompe.

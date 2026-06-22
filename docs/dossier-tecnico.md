@@ -314,12 +314,12 @@ Detalle no obvio: una build **dev** (sin optimizar) hace la búsqueda ~10× más
 ## 16. Comparativa rápida (para la pregunta "¿por qué no Qdrant / SQL Server?")
 
 - **Qdrant**: base **vectorial** dedicada, escala masiva (sharding/réplicas), máximo QPS de ANN —
-  pero **no embebe ni extrae documentos** (traes vectores y pipeline). Elígelo para escala enorme.
+  pero **no extrae documentos** (traes el pipeline de extracción y troceado). Elígelo para escala enorme.
 - **SQL Server 2025 + vectores**: RDBMS generalista con tipo `VECTOR`/DiskANN; vectores **junto a
-  datos relacionales** y HA empresarial — embeddings externos, híbrido y chunking a mano.
+  datos relacionales** y HA empresarial — híbrido y chunking a mano.
 - **Nucleus**: RAG **funcionando ya**, on-prem/privado, sin montar pipeline; escala media (millones
-  de chunks en un nodo). La comparativa justa es **end-to-end** (embed + buscar): Nucleus embebe
-  en proceso (~11 ms, sin salto de red), donde los otros pagan una llamada externa.
+  de chunks en un nodo). El diferencial está en la ingesta **end-to-end** dentro del motor
+  (extracción + chunking + embeddings + índice), no en un componente aislado.
 
 (Aviso de honestidad: el número de Nucleus es medido; los de Qdrant/SQL Server son
 características conocidas, no medidas en el mismo banco.)

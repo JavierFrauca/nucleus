@@ -1,9 +1,8 @@
 # Nucleus
 
-Motor de base de datos **orientado a RAG** escrito en Rust. A diferencia de un
-stack típico (Qdrant + un servicio de embeddings externo), Nucleus **es** el motor:
-almacena, indexa y **genera los embeddings en proceso**. Está organizado en torno a
-dos ejes de primera clase:
+Motor de base de datos **orientado a RAG** escrito en Rust. Nucleus es un motor
+todo-en-uno: almacena, indexa y **genera los embeddings en proceso**. Está
+organizado en torno a dos ejes de primera clase:
 
 - **Dominios** — colecciones/namespaces que segmentan la base. Cada dominio fija un
   modelo de embeddings (y por tanto una dimensión) y tiene su propio índice vectorial
