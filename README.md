@@ -151,7 +151,10 @@ Todas las rutas (salvo `/healthz`) requieren `Authorization: Bearer <token>`.
 | `PATCH /v1/domains/{id}`               | Admin    | Renombrar dominio                    |
 | `DELETE /v1/domains/{id}`              | Admin    | Borrar dominio (cascada total)       |
 | `POST /v1/domains/{id}/documents`      | Write    | Ingestar documento (asíncrono)       |
+| `POST /v1/domains/{id}/documents/batch`| Write    | Ingestar varios documentos (array)   |
+| `POST /v1/domains/{id}/reindex`        | Admin    | Reindexar/cambiar modelo (job)       |
 | `POST /v1/domains/{id}/search`         | Read     | **Buscar chunks** (`diversity` opc.) |
+| `POST /v1/search`                      | Read     | Buscar en varios dominios (mismo modelo) |
 | `POST /v1/domains/{id}/tags`           | Write    | Crear etiqueta (label)               |
 | `GET /v1/domains/{id}/tags`            | Read     | Listar etiquetas                     |
 | `PATCH /v1/domains/{id}/tags/{tag}`    | Write    | Editar etiqueta (display/desc)       |
@@ -160,13 +163,15 @@ Todas las rutas (salvo `/healthz`) requieren `Authorization: Bearer <token>`.
 | `GET /v1/domains/{id}/subdomains`      | Read     | Listar subdominios                   |
 | `DELETE /v1/domains/{id}/subdomains/{sub}` | Write | Borrar subdominio (cascada docs)    |
 | `GET /v1/documents/{id}`               | Read     | Obtener documento                    |
+| `PATCH /v1/documents/{id}`             | Write    | Re-etiquetar / mover de subdominio    |
 | `DELETE /v1/documents/{id}`            | Write    | Borrar documento + chunks            |
 | `GET /v1/chunks/{id}`                  | Read     | Obtener un chunk                     |
 | `GET /v1/chunks/{id}/context`          | Read     | Chunk + vecinos (`?before=&after=`)  |
 | `GET /v1/jobs/{id}`                    | auth     | Estado de un job                     |
 | `POST /v1/tokens`                      | Admin    | Crear token                          |
-| `GET /v1/tokens`                       | Admin    | Listar tokens                        |
+| `GET /v1/tokens`                       | Admin    | Listar tokens (con `last_used_at`)   |
 | `DELETE /v1/tokens/{id}`               | Admin    | Borrar token                         |
+| `POST /v1/tokens/{id}/rotate`          | Admin    | Rotar el secreto de un token         |
 | `POST /v1/maintenance/persist`         | Admin    | Volcar los índices HNSW a disco      |
 
 ### Ejemplo (curl)
@@ -326,8 +331,10 @@ El roadmap completo —priorizado por ejes (calidad, operación, escala, API,
 ingesta) y con el estado de cada ítem— vive en su propio documento:
 **[docs/roadmap.md](docs/roadmap.md)**.
 
-Ya implementado en la última iteración: **chunking por frontera de frase**,
-**diversidad de resultados (MMR)**, **borrado en cascada** y updates
-(dominios/subdominios/labels), y **rate limiting** configurable. Lo siguiente en
-la lista: snippets/highlighting, pre-filtrado en HNSW, reindexado con cambio de
-modelo y observabilidad (trazas + histogramas).
+Implementado: chunking por frontera de frase, **diversidad (MMR)**, **snippets**,
+**pre-filtrado HNSW adaptativo**, **reindexado/cambio de modelo**, borrado en
+cascada y updates, **PATCH de documento** (re-etiquetar/mover), **búsqueda
+multi-dominio**, **ingesta por lotes**, **rate limiting**, **rotación de tokens +
+last_used** e **histograma de latencia** en `/metrics`. Diferidos (con su porqué
+en el roadmap): OCR, backups en S3, cuantización PQ, mmap de HNSW, OpenTelemetry,
+webhooks, auto-inducción de labels y multi-nodo.

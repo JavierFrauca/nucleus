@@ -178,6 +178,66 @@ paths:
               schema: { type: array, items: { $ref: "#/components/schemas/Document" } }
         "403": { $ref: "#/components/responses/Error" }
 
+  /v1/domains/{id}/documents/batch:
+    post:
+      tags: [documents]
+      summary: Ingest many documents in one request (async)
+      parameters: [{ $ref: "#/components/parameters/IdPath" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: array, items: { $ref: "#/components/schemas/IngestReq" } }
+      responses:
+        "200":
+          description: One result per item, in order
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/IngestResp" } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /v1/domains/{id}/reindex:
+    post:
+      tags: [maintenance]
+      summary: Re-embed a domain (optionally switching model) and rebuild its index (async)
+      parameters: [{ $ref: "#/components/parameters/IdPath" }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReindexReq" }
+      responses:
+        "200":
+          description: Reindex job enqueued
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/ReindexResp" } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /v1/search:
+    post:
+      tags: [search]
+      summary: Search across several domains of the same model
+      description: |
+        Requires `Read` on every domain in `domain_ids`. Per-domain id filters
+        don't apply across domains; use `filter` (by tag name). Results from all
+        domains are merged by score into the global top-`k`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MultiSearchReq" }
+      responses:
+        "200":
+          description: Ranked hits (each carries its domain_id)
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Hit" } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+
   /v1/domains/{id}/files:
     post:
       tags: [documents]
@@ -341,6 +401,22 @@ paths:
             application/json: { schema: { $ref: "#/components/schemas/Document" } }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+    patch:
+      tags: [documents]
+      summary: Re-assign a document's labels and/or subdomain
+      parameters: [{ $ref: "#/components/parameters/IdPath" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateDocReq" }
+      responses:
+        "200":
+          description: Updated document
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/Document" } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
     delete:
       tags: [documents]
       summary: Delete a document and its chunks
@@ -441,6 +517,20 @@ paths:
       parameters: [{ $ref: "#/components/parameters/IdPath" }]
       responses:
         "204": { description: Deleted (or already absent) }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /v1/tokens/{id}/rotate:
+    post:
+      tags: [tokens]
+      summary: Rotate a token's secret (admin)
+      description: Same id/scopes/expiry, a fresh secret; the old one stops working. Plaintext shown once.
+      parameters: [{ $ref: "#/components/parameters/IdPath" }]
+      responses:
+        "200":
+          description: New plaintext token (shown once)
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/CreateTokenResp" } }
+        "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
 
   /v1/maintenance/persist:
@@ -680,11 +770,43 @@ components:
       properties:
         chunk_id: { type: integer, format: int64 }
         document_id: { type: integer, format: int64 }
+        domain_id: { type: integer, format: int64 }
         score: { type: number, format: float, description: "Score of the last applied stage (RRF or rerank); scale is not portable." }
         text: { type: string }
+        snippet: { type: string, nullable: true, description: "Excerpt centred on the matched query terms; omitted for vector-only queries." }
         tags: { type: array, items: { type: integer, format: int64 } }
         metadata: { $ref: "#/components/schemas/StringMap" }
-      required: [chunk_id, document_id, score, text, tags, metadata]
+      required: [chunk_id, document_id, domain_id, score, text, tags, metadata]
+
+    MultiSearchReq:
+      type: object
+      properties:
+        domain_ids: { type: array, items: { type: integer, format: int64 }, description: "Domains to search; all must share the same model." }
+        query: { type: string, nullable: true }
+        query_vector: { type: array, nullable: true, items: { type: number, format: float } }
+        k: { type: integer, default: 10 }
+        filter: { type: string, nullable: true, description: "Query-language filter (by tag name)." }
+        diversity: { type: number, format: float, default: 0, minimum: 0, maximum: 1 }
+      required: [domain_ids]
+
+    UpdateDocReq:
+      type: object
+      description: "Re-assign labels and/or subdomain. Omitted fields are left unchanged; an empty `subdomain` clears it."
+      properties:
+        labels: { type: array, nullable: true, items: { type: string }, description: "Replacement label names (created if missing)." }
+        tags: { type: array, nullable: true, items: { type: integer, format: int64 }, description: "Replacement existing tag ids." }
+        subdomain: { type: string, nullable: true, description: "New subdomain name; empty string clears it." }
+
+    ReindexReq:
+      type: object
+      properties:
+        model: { type: string, nullable: true, description: "New embedding model; omit to re-embed with the current one." }
+
+    ReindexResp:
+      type: object
+      properties:
+        job_id: { type: integer, format: int64 }
+      required: [job_id]
 
     CreateTagReq:
       type: object
@@ -748,6 +870,7 @@ components:
         scopes: { type: array, items: { $ref: "#/components/schemas/Scope" } }
         created_at: { type: integer, format: int64 }
         expires_at: { type: integer, format: int64, nullable: true }
+        last_used_at: { type: integer, format: int64, nullable: true, description: "Last successful auth (in-memory; null if unused since restart)." }
       required: [id, name, scopes, created_at]
 
     PersistResp:

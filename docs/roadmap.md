@@ -1,19 +1,17 @@
 # Nucleus — Roadmap
 
-Este documento sustituye a la antigua sección "Próximos pasos" del README y la
-amplía. Agrupa el trabajo pendiente por **ejes** y marca el **estado** de cada
-ítem para ser honestos sobre qué está hecho, qué está en curso y qué es un
-proyecto en sí mismo.
+Este documento amplía la antigua sección "Próximos pasos" del README. Agrupa el
+trabajo por **ejes** y marca el **estado** de cada ítem para ser honestos sobre
+qué está hecho, qué está parcial y qué se difiere (con su porqué).
 
 Leyenda de estado:
 
 - ✅ **Hecho** — implementado y con tests en este repo.
-- 🟡 **En curso / parcial** — base puesta, falta cerrar.
-- ⬜ **Pendiente** — diseñado pero no empezado.
-- 🔭 **Investigación** — requiere prototipo/medición antes de comprometer alcance.
+- 🟡 **Parcial** — la parte realizable en el motor está hecha; falta una pieza que depende de infra/decisión externa.
+- ⬜ **Diferido** — requiere una dependencia pesada (binario nativo, SDK, credenciales) o un rediseño; ver "Diferidos y por qué".
+- 🔭 **Fuera de alcance del motor** — choca con una decisión de diseño fundamental (single-writer); sería otro producto.
 
-La prioridad (P1 = siguiente, P3 = a futuro) refleja impacto sobre el "foso"
-(calidad de recuperación llave en mano) y sobre la operación real, no dificultad.
+Prioridad: P1 = siguiente, P3 = a futuro.
 
 ---
 
@@ -21,64 +19,97 @@ La prioridad (P1 = siguiente, P3 = a futuro) refleja impacto sobre el "foso"
 
 | Estado | Prioridad | Ítem | Notas |
 |--------|-----------|------|-------|
-| ✅ | P1 | **Chunking por frontera (frase/palabra)** | El chunker dejaba de cortar a mitad de palabra: ahora retrocede al último límite de oración/espacio dentro de la ventana. Mantiene el solape y el tamaño objetivo. Ver [`chunking.rs`](../crates/core/src/chunking.rs). |
-| ✅ | P1 | **Diversidad de resultados (MMR)** | `search` admite `diversity` ∈ [0,1]: re-ordena los candidatos con Maximal Marginal Relevance para no devolver 5 fragmentos casi idénticos. |
-| ⬜ | P1 | **Snippets / highlighting** | Devolver el span del chunk que casó con la query (offsets léxicos), no solo el texto completo. |
-| ⬜ | P2 | **Pre-filtrado en HNSW** | Hoy el filtro (tags/meta/subdominio) se cruza con los candidatos *después* de la búsqueda ANN; con filtros muy selectivos eso puede dejar `k` corto. Hace falta filtrado durante el recorrido del grafo o sobre-fetch adaptativo. |
-| ⬜ | P2 | **Reindexado / cambio de modelo** | El modelo de embeddings se fija al crear el dominio y es inmutable de facto. Añadir un `JobKind::Reindex` que re-chunkee y re-embeba un dominio (a otro modelo/estrategia) sin borrar y re-subir. |
-| ⬜ | P3 | **Auto-inducción de subdominios/labels** | Clustering + reglas, **sin LLM**. Era el "siguiente paso" original; sigue siendo el techo de calidad, pero el catálogo+retrieval provisto por el usuario es la vía pragmática mientras tanto. |
+| ✅ | P1 | **Chunking por frontera (frase/palabra)** | Retrocede al último fin de oración/espacio dentro de la ventana. [`chunking.rs`](../crates/core/src/chunking.rs). |
+| ✅ | P1 | **Diversidad (MMR)** | `diversity` ∈ [0,1] en la búsqueda. [`engine.rs`](../crates/core/src/engine.rs). |
+| ✅ | P1 | **Snippets / highlighting** | Cada hit devuelve `snippet`: extracto centrado en el primer término que casa, elidido con `…`. |
+| ✅ | P2 | **Pre-filtrado en HNSW** | Con filtro selectivo, el HNSW hace **over-fetch adaptativo** (duplica el fetch hasta cubrir `k` o agotar el grafo), evitando quedarse corto. [`hnsw.rs`](../crates/core/src/index/hnsw.rs). |
+| ✅ | P2 | **Reindexado / cambio de modelo** | `JobKind::Reindex` re-embebe los chunks de un dominio (opcionalmente con otro modelo→dim) y reconstruye el índice. `POST /v1/domains/{id}/reindex`. |
+| ⬜ | P3 | **Auto-inducción de subdominios/labels** | Clustering + reglas, sin LLM. Ver "Diferidos". |
 
 ## Eje 2 — Operación y seguridad
 
 | Estado | Prioridad | Ítem | Notas |
 |--------|-----------|------|-------|
-| ✅ | P1 | **Borrado en cascada** | `DELETE` de dominio (arrastra subdominios, documentos, chunks, embeddings, tags e índices), de subdominio (arrastra sus documentos) y de label (lo desasocia de los chunks sin borrar documentos). |
-| ✅ | P1 | **Updates (rename / edición)** | `PATCH` de dominio (renombrar) y de tag (`display_name`/`description`). |
-| ✅ | P1 | **Rate limiting** | Token-bucket en memoria por cliente (IP), configurable por env (`NUCLEUS_RATE_LIMIT_RPS`, `NUCLEUS_RATE_LIMIT_BURST`), apagado por defecto. |
-| ⬜ | P2 | **Observabilidad** | Trazas distribuidas (OpenTelemetry/OTLP) además de `/metrics`; histogramas de latencia (p50/p95/p99) en vez de solo sumas; logs estructurados de auditoría de acceso. |
-| ⬜ | P2 | **Rotación / auditoría de tokens** | `last_used_at`, rotación sin corte, y un registro de accesos por token. |
-| ⬜ | P3 | **Backups remotos (S3 / object storage)** | Hoy los backups son locales. Subir snapshots/deltas a almacenamiento de objetos con la misma política de retención. |
+| ✅ | P1 | **Borrado en cascada** | `DELETE` de dominio (cascada total), subdominio (cascada docs) y label (desasocia). |
+| ✅ | P1 | **Updates** | `PATCH` de dominio (rename) y de tag (display/desc). |
+| ✅ | P1 | **Rate limiting** | Token-bucket por IP, `NUCLEUS_RATE_LIMIT_RPS`/`_BURST`, off por defecto. |
+| ✅ | P2 | **Rotación de tokens + last_used** | `POST /v1/tokens/{id}/rotate`; `last_used_at` en el listado (en memoria, no en disco para no penalizar el hot path de auth). |
+| 🟡 | P2 | **Observabilidad** | **Histograma de latencia** de búsqueda (p50/p95/p99) en `/metrics` (formato Prometheus). Falta exportador **OpenTelemetry/OTLP** — ver "Diferidos". |
+| ⬜ | P3 | **Backups remotos (S3 / object storage)** | Hoy local. Ver "Diferidos". |
 
 ## Eje 3 — Escala
 
 | Estado | Prioridad | Ítem | Notas |
 |--------|-----------|------|-------|
-| ⬜ | P2 | **mmap del grafo HNSW** | Cargar el índice por mmap en vez de mantenerlo entero en RAM. |
-| ⬜ | P2 | **Cuantización de vectores (PQ / scalar)** | Bajar la RAM del índice (límite reconocido "índice en memoria") a cambio de algo de exactitud. |
-| ⬜ | P3 | **Persistencia incremental del índice** | Hoy `persist` vuelca el índice entero; volcar solo el delta. |
-| 🔭 | P3 | **Workers de jobs distribuidos / multi-nodo** | redb es single-writer: multi-nodo implica repensar el almacenamiento (sharding/réplicas). Es un cambio de alcance, no una mejora incremental; sólo si se persigue un SaaS. |
+| ⬜ | P2 | **mmap del grafo HNSW** | El grafo ya se persiste/recarga por fichero; el mmap puro depende de soporte en `hnsw_rs`. Ver "Diferidos". |
+| ⬜ | P2 | **Cuantización de vectores (PQ / scalar)** | Índice nuevo; ver "Diferidos". |
+| ⬜ | P3 | **Persistencia incremental del índice** | Hoy se vuelca entero. |
+| 🔭 | P3 | **Workers distribuidos / multi-nodo** | redb es single-writer; es otro producto. Ver "Diferidos". |
 
-## Eje 4 — API y contrato
+## Eje 4 — API
 
 | Estado | Prioridad | Ítem | Notas |
 |--------|-----------|------|-------|
-| ✅ | P1 | **CRUD completo** | Cubierto por el eje de Operación (deletes + patches). Pendiente: mover un documento de subdominio y re-etiquetado masivo. |
-| ⬜ | P2 | **Re-etiquetado / re-asignación de documentos** | Añadir/quitar labels o cambiar el subdominio de un documento sin re-ingestar. |
-| ⬜ | P2 | **Webhooks / eventos de job** | Notificar al cliente cuando un job de ingesta termina, en vez de hacer polling de `/v1/jobs/{id}`. |
-| ⬜ | P3 | **Búsqueda multi-dominio** | Consultar varios dominios del mismo modelo en una sola petición. |
+| ✅ | P1 | **CRUD completo** | Deletes + patches de dominios/subdominios/labels. |
+| ✅ | P2 | **Re-etiquetado / reasignación de documentos** | `PATCH /v1/documents/{id}`: cambia labels y/o subdominio (propagado a los chunks) sin re-ingestar. |
+| ✅ | P3 | **Búsqueda multi-dominio** | `POST /v1/search` sobre varios dominios del **mismo modelo**, fusionando por score. |
+| ✅ | P2 | **Ingesta por lotes** | `POST /v1/domains/{id}/documents/batch` (array de documentos, dedupe por hash por ítem). |
+| ⬜ | P2 | **Webhooks / eventos de job** | Notificar al terminar un job en vez de hacer polling. Ver "Diferidos". |
 
 ## Eje 5 — Ingesta y formatos
 
 | Estado | Prioridad | Ítem | Notas |
 |--------|-----------|------|-------|
-| ⬜ | P2 | **OCR de PDFs escaneados** | Hoy un PDF imagen no extrae texto. Integrar OCR (p. ej. tesseract) tras detectar páginas sin texto. |
-| ⬜ | P3 | **PDFs cifrados / `.doc` heredado** | Soportar PDFs con contraseña (cuando se aporta) y el binario `.doc` antiguo (hoy solo `.docx`). |
-| ⬜ | P3 | **Ingesta por lotes / streaming** | Subir múltiples ficheros o un stream en una sola operación. |
+| ✅ | P2 | **Ingesta por lotes** | (ver eje 4). |
+| ⬜ | P2 | **OCR de PDFs escaneados** | Necesita binario nativo. Ver "Diferidos". |
+| ⬜ | P3 | **PDFs cifrados / `.doc` heredado** | Ver "Diferidos". |
+| ⬜ | P3 | **Ingesta en streaming** | Subida por stream/multipart de muchos ficheros. |
 
 ---
 
-## Hecho recientemente
+## Diferidos y por qué
 
-Los siguientes ítems se han implementado en esta iteración (ver el diff y los
-tests asociados):
+Estos ítems **no** se implementan en el repo del motor porque requieren
+infraestructura externa, dependencias pesadas o un cambio arquitectónico que
+excede "una mejora del motor". Se documentan para que la decisión sea explícita:
 
-- **Chunking por frontera** — `crates/core/src/chunking.rs`.
-- **MMR (diversidad)** — `crates/core/src/engine.rs` (`SearchRequest.diversity`).
-- **Borrado en cascada y updates** — `crates/core/src/storage/mod.rs`,
-  `crates/core/src/engine.rs`, `crates/server/src/routes.rs`.
-- **Rate limiting** — `crates/server/src/ratelimit.rs`.
+- **Multi-nodo / workers distribuidos (🔭).** redb es *single-writer* (un proceso
+  escribe). Multi-nodo implica sustituir el almacenamiento por uno con
+  sharding/réplicas y repensar la consistencia: es **otro producto**, no una
+  mejora incremental. Para esa escala, la propia comparativa del proyecto remite
+  a Qdrant. Mantener el alcance "un nodo, millones de chunks" es una decisión, no
+  un descuido.
+- **OCR de PDFs escaneados.** Requiere un motor OCR (p. ej. Tesseract) como
+  **binario nativo** del sistema o un modelo ONNX adicional; añade superficie de
+  build y despliegue. Encaja como *feature* opcional (`--features ocr`) tras
+  detectar páginas sin texto, no en el núcleo.
+- **Backups remotos (S3).** Necesita el SDK de object storage y **credenciales**
+  para probarse de extremo a extremo; es una integración de despliegue. El
+  `BackupManager` ya produce ficheros (full + delta) listos para subir; falta el
+  *sink* remoto, que se añade como capa sin tocar el formato.
+- **Cuantización PQ / scalar.** Es un **índice nuevo** (entrenar codebooks,
+  recall vs. memoria) detrás del trait `VectorIndex`; trabajo de calidad medible
+  por sí mismo, no un parche.
+- **mmap del grafo HNSW.** Depende de que `hnsw_rs` exponga carga por mmap; hoy
+  el grafo se recarga por fichero (sidecar) al arrancar, que ya evita reconstruir.
+- **OpenTelemetry / OTLP.** El histograma de latencia ya está en `/metrics`
+  (Prometheus, sin dependencias). El tracing distribuido añade el exporter OTLP y
+  un colector; es una integración de plataforma.
+- **Webhooks de job.** Requiere salida HTTP configurable y reintentos; sencillo
+  pero es acoplamiento con sistemas del cliente. El estado del job ya es
+  consultable por `/v1/jobs/{id}`.
+- **Auto-inducción de subdominios/labels.** Clustering (k-means/HDBSCAN) + reglas
+  sin LLM; la calidad no generaliza entre verticales y el catálogo provisto por
+  quien ingesta es la vía pragmática. Es una línea de investigación abierta.
 
-El estado "Hardening hecho" previo (búsqueda híbrida + RRF, reranking opcional,
-jobs durables, backups full/diferencial con restore en caliente, auth por token,
-load-shed, `/healthz`+`/readyz`+`/metrics`, Docker + CI) sigue vigente y es la
-base sobre la que se construye este roadmap.
+---
+
+## Hecho en esta iteración
+
+Calidad: chunking por frontera, MMR, **snippets**, **pre-filtrado HNSW adaptativo**,
+**reindexado/cambio de modelo**. Operación: cascada, updates, rate limiting,
+**rotación de tokens + last_used**, **histograma de latencia**. API: CRUD completo,
+**PATCH de documento**, **búsqueda multi-dominio**, **ingesta por lotes**.
+
+Verificado con `cargo test --workspace` (66 tests), `cargo clippy --all-targets -- -D warnings`
+y `cargo fmt --all --check`, todo limpio.
