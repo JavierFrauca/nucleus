@@ -9,7 +9,7 @@ use std::sync::atomic::Ordering;
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -61,6 +61,7 @@ fn resolve_structure(
 /// token-bucket layer is installed as the outermost middleware.
 pub fn router(state: AppState, rate_limiter: Option<Arc<RateLimiter>>) -> Router {
     let router = Router::new()
+        .route("/", get(dashboard))
         .route("/healthz", get(health))
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
@@ -122,6 +123,12 @@ pub fn router(state: AppState, rate_limiter: Option<Arc<RateLimiter>>) -> Router
 
 async fn health() -> &'static str {
     "ok"
+}
+
+/// Self-contained web dashboard (served same-origin, so no CORS needed). The
+/// page is public; all data calls from it carry the user's bearer token.
+async fn dashboard() -> Html<&'static str> {
+    Html(include_str!("dashboard.html"))
 }
 
 /// Readiness: confirms the storage is reachable (cheap query).
@@ -1689,6 +1696,26 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert!(none.as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dashboard_is_served_at_root() {
+        let (h, _dir) = harness();
+        let req = Request::builder()
+            .method("GET")
+            .uri("/")
+            .body(Body::empty())
+            .unwrap();
+        let resp = h.app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(ct.contains("text/html"));
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&body).contains("Nucleus"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

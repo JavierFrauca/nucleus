@@ -42,6 +42,7 @@ Prioridad: P1 = siguiente, P3 = a futuro.
 | ✅ | P1 | **Borrado en cascada** | `DELETE` de dominio (cascada total), subdominio (cascada docs) y label (desasocia). |
 | ✅ | P1 | **Updates** | `PATCH` de dominio (rename) y de tag (display/desc). |
 | ✅ | P1 | **Rate limiting** | Token-bucket por IP, `NUCLEUS_RATE_LIMIT_RPS`/`_BURST`, off por defecto. |
+| ✅ | P2 | **Dashboard web** | Panel autocontenido en `GET /` (mismo origen): dominios, ingesta (texto/fichero), búsqueda con snippets/MMR y jobs. [`dashboard.html`](../crates/server/src/dashboard.html). |
 | ✅ | P2 | **Rotación de tokens + last_used** | `POST /v1/tokens/{id}/rotate`; `last_used_at` en el listado (en memoria, no en disco para no penalizar el hot path de auth). |
 | 🟡 | P2 | **Observabilidad** | **Histograma de latencia** de búsqueda (p50/p95/p99) en `/metrics` (formato Prometheus). Falta exportador **OpenTelemetry/OTLP** — ver "Diferidos". |
 | ⬜ | P3 | **Backups remotos (S3 / object storage)** | Hoy local. Ver "Diferidos". |

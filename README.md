@@ -65,6 +65,13 @@ demo headless de Node, y un mini-front de navegador con 2 pantallas (ingesta y b
   **restore en caliente** (swap del motor). Ver [operación](docs/operacion.md#backups-y-restauración).
 - **API HTTP** con axum.
 
+## Panel web
+
+El servidor sirve un **dashboard** autocontenido en `GET /` (mismo origen, sin
+CORS): pega tu token y crea dominios, ingesta texto o ficheros, busca (con
+*snippets*, *score* y control de diversidad MMR) y ves los jobs. Abre
+`http://127.0.0.1:8080/` tras arrancar.
+
 ## Arquitectura
 
 ```
