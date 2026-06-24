@@ -1,0 +1,99 @@
+@page "/"
+@rendermode InteractiveServer
+@inject NucleusService Nucleus
+
+<PageTitle>Nucleus embebido</PageTitle>
+
+<h1>Nucleus — RAG embebido en Blazor</h1>
+<p class="muted">
+    El motor corre <strong>dentro de este proceso .NET</strong> vía <code>nucleus.dll</code>
+    (P/Invoke). Sin servidor HTTP, sin red. Documentos indexados: <strong>@docCount</strong>.
+</p>
+
+<section>
+    <h2>Ingestar</h2>
+    <input @bind="title" placeholder="Título (opcional)" />
+    <input @bind="label" placeholder="Etiqueta (opcional)" />
+    <textarea @bind="text" rows="4" placeholder="Texto a indexar…"></textarea>
+    <button @onclick="Ingest" disabled="@busy">Ingestar</button>
+    @if (ingestMsg is not null)
+    {
+        <p class="muted">@ingestMsg</p>
+    }
+</section>
+
+<section>
+    <h2>Buscar</h2>
+    <input @bind="query" @bind:event="oninput" @onkeyup="OnQueryKey" placeholder="Consulta en lenguaje natural…" />
+    <button @onclick="Search" disabled="@busy">Buscar</button>
+    @if (busy)
+    {
+        <p class="muted">Procesando… (la primera vez descarga el modelo de embeddings, ~450 MB)</p>
+    }
+    else if (hits is not null)
+    {
+        @if (hits.Count == 0)
+        {
+            <p class="muted">Sin resultados.</p>
+        }
+        else
+        {
+            @foreach (var h in hits)
+            {
+                <div class="hit"><span class="score">@h.Score.ToString("F3")</span>@h.Chunk.Text</div>
+            }
+        }
+    }
+</section>
+
+@code {
+    private string title = "", label = "", text = "", query = "";
+    private string? ingestMsg;
+    private IReadOnlyList<SearchHit>? hits;
+    private bool busy;
+    private int docCount;
+
+    protected override void OnInitialized() => docCount = Nucleus.DocumentCount();
+
+    private async Task Ingest()
+    {
+        if (string.IsNullOrWhiteSpace(text)) { ingestMsg = "Escribe algún texto primero."; return; }
+        busy = true;
+        ingestMsg = null;
+        try
+        {
+            // Embedding is CPU-bound and blocking — run it off the UI thread.
+            var r = await Task.Run(() => Nucleus.Ingest(title, text, label));
+            ingestMsg = $"Indexado: documento {r.DocumentId}, {r.ChunkCount} chunk(s).";
+            title = text = label = "";
+            docCount = Nucleus.DocumentCount();
+        }
+        catch (Exception ex)
+        {
+            ingestMsg = "Error: " + ex.Message;
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task Search()
+    {
+        if (string.IsNullOrWhiteSpace(query)) return;
+        busy = true;
+        try
+        {
+            hits = await Task.Run(() => Nucleus.Search(query));
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task OnQueryKey(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter") await Search();
+    }
+}

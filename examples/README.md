@@ -1,21 +1,27 @@
 # Ejemplos de uso
 
-Proyectos mínimos que muestran **cómo referenciar el SDK, inicializar el cliente y llamar a
-cada operación** contra un servidor Nucleus en marcha. No son producción: son para aprender.
+Proyectos mínimos para aprender. Hay **dos sabores** según el modo de Nucleus:
 
-Requisitos previos: un servidor Nucleus arrancado y un **token** (de admin para crear
-dominios/backups). Ver [guía rápida](../docs/guia-rapida.md).
+- **Embebido (DLL)** — el motor corre *dentro* de tu proceso vía `nucleus.dll`, sin red ni
+  servidor. No necesitan token ni servidor arrancado; sí necesitan `nucleus.dll` compilada
+  (`cargo build -p nucleus-ffi --release`, que los `.csproj` copian junto al ejecutable).
+- **Cliente-servidor (HTTP)** — usan el SDK contra un `nucleus-server` en marcha + un **token**.
+
+| Ejemplo | Lenguaje | Modo | Qué muestra |
+|---|---|---|---|
+| [`csharp/NucleusBlazor`](csharp/NucleusBlazor) | C# / Blazor | **Embebido** | Web app Blazor Server con UI de **ingesta + búsqueda**; el motor vive en el propio proceso .NET (P/Invoke a `nucleus.dll`). |
+| [`ffi-smoke`](ffi-smoke) | C# / consola | **Embebido** | Smoke test end-to-end del binding nativo `Nucleus.Native` (open → ingestar → buscar → editar → reindex). |
+| [`csharp/NucleusDemo`](csharp/NucleusDemo) | C# / .NET | HTTP | Consola con **menú** (crear dominio, ingestar texto, buscar, listar, backup, **subir fichero crudo**). |
+| [`javascript/node`](javascript/node) | Node (JS) | HTTP | `demo.mjs`: flujo **headless** (crear → ingestar → esperar job → buscar). `upload.mjs`: **subida de fichero crudo** (PDF…). |
+| [`javascript/browser`](javascript/browser) | Navegador | HTTP | Mini-UI con **2 pantallas** (Ingesta —texto o **fichero**— y Búsqueda) usando el SDK por ESM. |
+
+Los ejemplos **HTTP** requieren un servidor arrancado y un token (de admin para crear
+dominios/backups). Ver [guía rápida](../docs/guia-rapida.md):
 
 ```bash
 # en otra terminal: arranca el servidor y copia el token admin que imprime
 nucleus-server          # token en NUCLEUS_ADMIN_TOKEN_FILE
 ```
-
-| Ejemplo | Lenguaje | Qué muestra |
-|---|---|---|
-| [`csharp/NucleusDemo`](csharp/NucleusDemo) | C# / .NET | Consola con **menú** (crear dominio, ingestar texto, buscar, listar, backup, **subir fichero crudo**). |
-| [`javascript/node`](javascript/node) | Node (JS) | `demo.mjs`: flujo **headless** (crear → ingestar → esperar job → buscar). `upload.mjs`: **subida de fichero crudo** (PDF…). |
-| [`javascript/browser`](javascript/browser) | Navegador | Mini-UI con **2 pantallas** (Ingesta —texto o **fichero**— y Búsqueda) usando el SDK por ESM. |
 
 **Subida de fichero crudo** (los bytes; el motor extrae el texto): opción 6 del menú en C#,
 `node upload.mjs <ruta.pdf>` en Node, y el selector de fichero en la pantalla de Ingesta del
@@ -27,7 +33,12 @@ Todos leen la URL y el token de variables de entorno:
 ## Arrancar cada uno
 
 ```bash
-# C#
+# Blazor embebido (sin servidor ni token; primero compila la DLL)
+cargo build -p nucleus-ffi --release
+cd examples/csharp/NucleusBlazor
+dotnet run                         # abre http://localhost:5099
+
+# C# (HTTP)
 cd csharp/NucleusDemo
 $env:NUCLEUS_TOKEN="nuc_…"        # PowerShell (export NUCLEUS_TOKEN=… en bash)
 dotnet run
