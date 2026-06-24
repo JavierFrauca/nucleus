@@ -32,6 +32,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .filter(|p| !p.as_os_str().is_empty())
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
+    // Ensure the data directory exists — the default now lives under a platform
+    // location (e.g. %ProgramData%\Nucleus) that may not exist on first run.
+    std::fs::create_dir_all(&data_dir)?;
     // A previous restore may have pointed the live database at a new file.
     let db_path = active_db_path(&data_dir).unwrap_or_else(|| cfg.db_path.clone());
     if db_path != cfg.db_path {

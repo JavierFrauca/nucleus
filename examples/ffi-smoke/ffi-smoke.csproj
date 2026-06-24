@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>ffi-smoke</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\clients\csharp\Nucleus.Native\Nucleus.Native.csproj" />
+  </ItemGroup>
+
+  <!-- Copy the freshly-built nucleus.dll next to the executable so P/Invoke finds it. -->
+  <ItemGroup>
+    <None Include="..\..\target\release\nucleus.dll" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

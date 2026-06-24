@@ -1,0 +1,26 @@
+[package]
+name = "nucleus-ffi"
+description = "C ABI for embedding Nucleus in-process as a native library (DLL/.so/.dylib)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+# `nucleus` -> `nucleus.dll` (Windows), `libnucleus.so` (Linux), `libnucleus.dylib` (macOS).
+name = "nucleus"
+# cdylib: the loadable DLL referenced from C#/C++/... Add "staticlib" here if you
+# also need to statically link the whole engine into a native binary (produces a
+# large `nucleus.lib`); omitted by default to keep `target/` small.
+crate-type = ["cdylib"]
+
+[dependencies]
+nucleus-core = { path = "../core" }
+serde = { workspace = true }
+serde_json = "1"
+
+[features]
+default = []
+# Forward GPU (ONNX DirectML) embedding to the core engine.
+gpu = ["nucleus-core/gpu"]
