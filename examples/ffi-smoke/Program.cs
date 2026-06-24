@@ -78,4 +78,23 @@ var persisted = engine.PersistIndexes().RootElement.GetProperty("persisted").Get
 Console.WriteLine($"[persist_indexes] persisted {persisted} index(es)");
 Console.WriteLine($"[index files] {(Directory.Exists(indexDir) ? string.Join(", ", Directory.GetFiles(indexDir).Select(Path.GetFileName)) : "(none)")}");
 
+// --- new capabilities from the core upgrade --------------------------------
+var renamed = engine.RenameDomain(domainId, "legal-es");
+Console.WriteLine($"\n[rename_domain] -> {renamed.RootElement.GetProperty("name").GetString()}");
+
+engine.UpdateDocument(docIds[0], labels: ["contratos", "arrendamiento"]);
+var d0 = engine.GetDocument(docIds[0]);
+Console.WriteLine($"[update_document] doc {docIds[0]} now has {d0.RootElement.GetProperty("tags").GetArrayLength()} tag(s)");
+
+var multi = engine.SearchMulti([domainId], "rescisión", k: 2);
+Console.WriteLine($"[search_multi] {multi.RootElement.GetProperty("hits").GetArrayLength()} hit(s) across 1 domain");
+
+var diverse = engine.Search(domainId, "contrato", k: 2, diversity: 0.7f);
+var firstHit = diverse.RootElement.GetProperty("hits")[0];
+var snip = firstHit.TryGetProperty("snippet", out var s) ? s.GetString() : "(none)";
+Console.WriteLine($"[search diversity=0.7] {diverse.RootElement.GetProperty("hits").GetArrayLength()} hit(s); snippet: {snip}");
+
+var reidx = engine.ReindexDomain(domainId).RootElement.GetProperty("reindexed").GetInt32();
+Console.WriteLine($"[reindex_domain] re-embedded {reidx} chunk(s)");
+
 Console.WriteLine("\nSMOKE TEST OK");

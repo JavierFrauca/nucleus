@@ -39,6 +39,9 @@ default = []
 # Run embedding inference on the GPU via ONNX Runtime's DirectML provider
 # (Windows), falling back to CPU. Requires a compatible GPU/driver at runtime.
 gpu = ["dep:ort", "ort/directml", "ort/download-binaries"]
+# Run inference on an NVIDIA GPU via ONNX Runtime's CUDA provider, falling back
+# to CPU. Requires CUDA/cuDNN at runtime. Mutually compatible with `gpu`.
+cuda = ["dep:ort", "ort/cuda", "ort/download-binaries"]
 
 [dev-dependencies]
 tempfile = "3"

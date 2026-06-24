@@ -66,6 +66,11 @@ impl BackupManager {
         self.dir.join("catalog.json")
     }
 
+    /// Absolute path of a backup's file on disk (for an upload sink).
+    pub fn file_path(&self, rec: &BackupRecord) -> PathBuf {
+        self.dir.join(&rec.file)
+    }
+
     /// All backups, oldest first.
     pub fn list(&self) -> Result<Vec<BackupRecord>> {
         let p = self.catalog_path();
@@ -202,8 +207,8 @@ impl BackupManager {
         let mut kept = Vec::new();
         let mut removed = 0;
         for r in &recs {
-            let drop = doomed.contains(&r.id)
-                || r.parent.as_ref().is_some_and(|p| doomed.contains(p));
+            let drop =
+                doomed.contains(&r.id) || r.parent.as_ref().is_some_and(|p| doomed.contains(p));
             if drop {
                 let _ = fs::remove_file(self.dir.join(&r.file));
                 removed += 1;
@@ -285,6 +290,7 @@ mod tests {
                     document_ids: vec![],
                     subdomain: None,
                     filter: None,
+                    diversity: 0.0,
                 },
             )
             .unwrap();

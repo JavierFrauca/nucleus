@@ -54,12 +54,33 @@ int nucleus_ingest_text(NucleusEngine *handle, const char *input_json, char **ou
 /* {"document_id":N} -> {"deleted":true} */
 int nucleus_delete_document(NucleusEngine *handle, const char *input_json, char **out_json);
 
+/* edit / delete (cascade) ------------------------------------------------- */
+
+/* {"domain_id":N,"name":"..."} -> Domain */
+int nucleus_rename_domain(NucleusEngine *handle, const char *input_json, char **out_json);
+/* {"domain_id":N} -> {"deleted":true}  (cascades subdomains/docs/chunks/tags) */
+int nucleus_delete_domain(NucleusEngine *handle, const char *input_json, char **out_json);
+/* {"subdomain_id":N} -> {"deleted":true}  (cascades its documents) */
+int nucleus_delete_subdomain(NucleusEngine *handle, const char *input_json, char **out_json);
+/* {"tag_id":N,"display_name":"...","description":"..."} -> Tag */
+int nucleus_update_tag(NucleusEngine *handle, const char *input_json, char **out_json);
+/* {"tag_id":N} -> {"deleted":true}  (detaches; docs/chunks survive) */
+int nucleus_delete_tag(NucleusEngine *handle, const char *input_json, char **out_json);
+/* {"document_id":N,"labels":["a"],"subdomain":"x","clear_subdomain":false} -> Document */
+int nucleus_update_document(NucleusEngine *handle, const char *input_json, char **out_json);
+/* {"domain_id":N,"model":null} -> {"reindexed":N}  (re-embed + rebuild index) */
+int nucleus_reindex_domain(NucleusEngine *handle, const char *input_json, char **out_json);
+
 /* search ------------------------------------------------------------------ */
 
 /* {"domain_id":N,"query":"...","k":10,"labels":[],"match_all":false,
- *  "document_ids":[],"subdomain":null,"filter":null}
- *  -> {"hits":[{"chunk":{...},"score":0.87}]} */
+ *  "document_ids":[],"subdomain":null,"filter":null,"diversity":0.0}
+ *  -> {"hits":[{"chunk":{...},"score":0.87,"snippet":"..."}]} */
 int nucleus_search(NucleusEngine *handle, const char *input_json, char **out_json);
+
+/* {"domain_ids":[1,2],"query":"...","k":10,"filter":null,"diversity":0.0}
+ *  -> {"hits":[...]}  (domains must share a model) */
+int nucleus_search_multi(NucleusEngine *handle, const char *input_json, char **out_json);
 
 /* read / browse ----------------------------------------------------------- */
 

@@ -73,7 +73,12 @@ demo headless de Node, y un mini-front de navegador con 2 pantallas (ingesta y b
 - **Almacenamiento embebido** con [`redb`](https://www.redb.org/) (ACID, puro Rust),
   valores serializados con **bincode 2**.
 - **Índice vectorial** exacto (coseno, fuerza bruta) detrás del trait `VectorIndex`,
-  o **HNSW** aproximado y persistente para gran escala (mismo trait).
+  **HNSW** aproximado y persistente para gran escala, o **int8 (cuantización escalar)**
+  con ~4× menos RAM y recall casi exacto (mismo trait).
+- **Chunking *boundary-aware***: corta en frontera de frase (con _fallback_ a espacio),
+  nunca a mitad de palabra, con solapamiento configurable.
+- **Diversidad (MMR)** opcional en la búsqueda (`diversity` ∈ [0,1]) para reducir
+  redundancia entre resultados, y **snippet** resaltado por hit.
 - **Búsqueda híbrida**: índice **léxico BM25** + vectorial fusionados con **RRF**, para
   recuperar tanto lo semánticamente parecido como las citas literales (códigos,
   artículos). **Reranking** opcional con *cross-encoder* in-process (`bge-reranker-base`).
@@ -98,9 +103,14 @@ se descarga la primera vez es el modelo de embeddings (~450 MB).
 - **C ABI**: handle opaco + borde **JSON** (entrada/salida son strings JSON; código
   de retorno `0` OK / `<0` error con `{"error":...}` y `nucleus_last_error()`).
   Header C en [`crates/ffi/include/nucleus.h`](crates/ffi/include/nucleus.h).
-  Funciones: `open`/`close`, `create_domain`, `ingest_text`, `search`,
-  `list_domains`/`list_tags`/`list_subdomains`/`list_documents`, `get_document`,
-  `delete_document`, `chunk_context`, `persist_indexes`, `string_free`, `last_error`.
+  Funciones: `open`/`close`, `create_domain`, `ingest_text`, `search` (con MMR
+  `diversity` y `snippet`), `search_multi`, `list_domains`/`list_tags`/`list_subdomains`/`list_documents`,
+  `get_document`, `chunk_context`, edición/cascada (`rename_domain`, `delete_domain`,
+  `delete_subdomain`, `update_tag`, `delete_tag`, `update_document`, `delete_document`),
+  `reindex_domain`, `persist_indexes`, `string_free`, `last_error`.
+- **Índice**: `index_kind` = `"flat"` (exacto, por defecto), `"hnsw"` (aproximado) o
+  `"sq"` (cuantización int8, **~4× menos RAM** con recall casi exacto — ideal para
+  embeber en apps con poca huella de memoria).
 - **Binding C#** listo para usar: [`clients/csharp/Nucleus.Native`](clients/csharp/Nucleus.Native)
   (`NucleusEngine : IDisposable`, P/Invoke).
 - **Camino síncrono**: la ingesta (chunk → embed → persist → index) y la búsqueda

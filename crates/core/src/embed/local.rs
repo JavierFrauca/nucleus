@@ -94,12 +94,12 @@ impl LocalEmbedder {
         if let Some(dir) = &self.cache_dir {
             opts = opts.with_cache_dir(dir.clone());
         }
-        #[cfg(feature = "gpu")]
+        #[cfg(any(feature = "gpu", feature = "cuda"))]
         if self.gpu {
             opts = opts.with_execution_providers(gpu_execution_providers());
         }
-        #[cfg(not(feature = "gpu"))]
-        let _ = self.gpu; // field is only consulted under the `gpu` feature
+        #[cfg(not(any(feature = "gpu", feature = "cuda")))]
+        let _ = self.gpu; // field is only consulted under a GPU feature
         let te =
             TextEmbedding::try_new(opts).map_err(|e| NucleusError::embedding_msg(e.to_string()))?;
         let arc = Arc::new(te);
@@ -163,13 +163,24 @@ impl Embedder for LocalEmbedder {
     }
 }
 
-/// GPU-first execution providers (DirectML, then CPU fallback). Only compiled
-/// with the `gpu` feature.
-#[cfg(feature = "gpu")]
+/// GPU-first execution providers, with a CPU fallback last. Compiled only with a
+/// GPU feature: CUDA (NVIDIA) when `cuda` is on, DirectML (Windows) when `gpu` is
+/// on; if both are enabled, CUDA is tried first.
+#[cfg(any(feature = "gpu", feature = "cuda"))]
 fn gpu_execution_providers() -> Vec<fastembed::ExecutionProviderDispatch> {
-    use ort::execution_providers::{CPUExecutionProvider, DirectMLExecutionProvider};
-    vec![
-        DirectMLExecutionProvider::default().build(),
-        CPUExecutionProvider::default().build(),
-    ]
+    use ort::execution_providers::CPUExecutionProvider;
+    #[allow(unused_mut)]
+    let mut providers = Vec::new();
+    #[cfg(feature = "cuda")]
+    {
+        use ort::execution_providers::CUDAExecutionProvider;
+        providers.push(CUDAExecutionProvider::default().build());
+    }
+    #[cfg(feature = "gpu")]
+    {
+        use ort::execution_providers::DirectMLExecutionProvider;
+        providers.push(DirectMLExecutionProvider::default().build());
+    }
+    providers.push(CPUExecutionProvider::default().build());
+    providers
 }

@@ -38,7 +38,7 @@ use serde_json::json;
 
 use nucleus_core::embed::{Embedder, LocalEmbedder};
 use nucleus_core::engine::{IngestBody, QueryInput, SearchRequest};
-use nucleus_core::id::{ChunkId, DocumentId, DomainId};
+use nucleus_core::id::{ChunkId, DocumentId, DomainId, SubdomainId, TagId};
 use nucleus_core::index::IndexKind;
 use nucleus_core::storage::Storage;
 use nucleus_core::Engine;
@@ -186,11 +186,13 @@ pub unsafe extern "C" fn nucleus_open(
     let index_kind = match cfg.index_kind.as_deref() {
         None | Some("flat") => IndexKind::Flat,
         Some("hnsw") => IndexKind::Hnsw,
+        // int8 scalar quantisation: ~4x less RAM at a negligible recall cost.
+        Some("sq") | Some("scalar") => IndexKind::Sq,
         Some(other) => {
             return fail(
                 ptr::null_mut(),
                 NUCLEUS_ERR_JSON,
-                format!("unknown index_kind '{other}' (expected 'flat' or 'hnsw')"),
+                format!("unknown index_kind '{other}' (expected 'flat', 'hnsw' or 'sq')"),
             )
         }
     };
@@ -396,6 +398,10 @@ struct SearchInput {
     /// Optional query-language filter (`tag:` / `meta.*` / AND·OR·NOT).
     #[serde(default)]
     filter: Option<String>,
+    /// Result diversity via MMR, in `[0, 1]`. `0` (default) = pure relevance;
+    /// higher trades relevance for less redundancy among the returned chunks.
+    #[serde(default)]
+    diversity: f32,
 }
 
 fn default_k() -> usize {
@@ -406,6 +412,9 @@ fn default_k() -> usize {
 struct HitOut {
     chunk: nucleus_core::model::Chunk,
     score: f32,
+    /// Excerpt centred on the matched query terms, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snippet: Option<String>,
 }
 
 /// Search a domain by text. Output: `{"hits":[{"chunk":{...},"score":0.87}, ...]}`.
@@ -460,11 +469,14 @@ pub unsafe extern "C" fn nucleus_search(
         document_ids: input.document_ids.into_iter().map(DocumentId::from).collect(),
         subdomain,
         filter: input.filter,
+        diversity: input.diversity,
     };
     match eng.search(domain_id, req) {
         Ok(hits) => {
-            let out: Vec<HitOut> =
-                hits.into_iter().map(|h| HitOut { chunk: h.chunk, score: h.score }).collect();
+            let out: Vec<HitOut> = hits
+                .into_iter()
+                .map(|h| HitOut { chunk: h.chunk, score: h.score, snippet: h.snippet })
+                .collect();
             ok_json(out_json, json!({ "hits": out }))
         }
         Err(e) => fail(out_json, NUCLEUS_ERR_ENGINE, e.to_string()),
@@ -689,6 +701,314 @@ pub unsafe extern "C" fn nucleus_chunk_context(
     };
     match eng.chunk_context(ChunkId::from(input.chunk_id), input.before, input.after) {
         Ok(chunks) => ok_json(out_json, json!({ "chunks": chunks })),
+        Err(e) => fail(out_json, NUCLEUS_ERR_ENGINE, e.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// edit / delete (cascade)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct RenameDomainInput {
+    domain_id: u64,
+    name: String,
+}
+
+/// Rename a domain. Input: `{"domain_id":N,"name":"..."}`. Output: the `Domain`.
+///
+/// # Safety
+/// See module docs.
+#[no_mangle]
+pub unsafe extern "C" fn nucleus_rename_domain(
+    handle: *mut Engine,
+    input_json: *const c_char,
+    out_json: *mut *mut c_char,
+) -> i32 {
+    let Some(eng) = engine(handle) else {
+        return fail(out_json, NUCLEUS_ERR_NULL_ARG, "engine handle is null".into());
+    };
+    let input: RenameDomainInput = match parse(input_json) {
+        Ok(v) => v,
+        Err(cm) => return fail(out_json, cm.0, cm.1),
+    };
+    match eng.rename_domain(DomainId::from(input.domain_id), &input.name) {
+        Ok(d) => ok_json(out_json, json!(d)),
+        Err(e) => fail(out_json, NUCLEUS_ERR_ENGINE, e.to_string()),
+    }
+}
+
+/// Delete a domain and everything under it (subdomains, documents, chunks, tags).
+/// Input: `{"domain_id":N}`. Output: `{"deleted":true}`.
+///
+/// # Safety
+/// See module docs.
+#[no_mangle]
+pub unsafe extern "C" fn nucleus_delete_domain(
+    handle: *mut Engine,
+    input_json: *const c_char,
+    out_json: *mut *mut c_char,
+) -> i32 {
+    let Some(eng) = engine(handle) else {
+        return fail(out_json, NUCLEUS_ERR_NULL_ARG, "engine handle is null".into());
+    };
+    let input: DomainRef = match parse(input_json) {
+        Ok(v) => v,
+        Err(cm) => return fail(out_json, cm.0, cm.1),
+    };
+    match eng.delete_domain(DomainId::from(input.domain_id)) {
+        Ok(()) => ok_json(out_json, json!({ "deleted": true })),
+        Err(e) => fail(out_json, NUCLEUS_ERR_ENGINE, e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+struct SubdomainRef {
+    subdomain_id: u64,
+}
+
+/// Delete a subdomain and cascade to its documents/chunks. Input:
+/// `{"subdomain_id":N}`. Output: `{"deleted":true}`.
+///
+/// # Safety
+/// See module docs.
+#[no_mangle]
+pub unsafe extern "C" fn nucleus_delete_subdomain(
+    handle: *mut Engine,
+    input_json: *const c_char,
+    out_json: *mut *mut c_char,
+) -> i32 {
+    let Some(eng) = engine(handle) else {
+        return fail(out_json, NUCLEUS_ERR_NULL_ARG, "engine handle is null".into());
+    };
+    let input: SubdomainRef = match parse(input_json) {
+        Ok(v) => v,
+        Err(cm) => return fail(out_json, cm.0, cm.1),
+    };
+    match eng.delete_subdomain(SubdomainId::from(input.subdomain_id)) {
+        Ok(()) => ok_json(out_json, json!({ "deleted": true })),
+        Err(e) => fail(out_json, NUCLEUS_ERR_ENGINE, e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+struct UpdateTagInput {
+    tag_id: u64,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+/// Update a label's display name and/or description. Input:
+/// `{"tag_id":N,"display_name":"...","description":"..."}` (omit fields to keep).
+/// Output: the `Tag`.
+///
+/// # Safety
+/// See module docs.
+#[no_mangle]
+pub unsafe extern "C" fn nucleus_update_tag(
+    handle: *mut Engine,
+    input_json: *const c_char,
+    out_json: *mut *mut c_char,
+) -> i32 {
+    let Some(eng) = engine(handle) else {
+        return fail(out_json, NUCLEUS_ERR_NULL_ARG, "engine handle is null".into());
+    };
+    let input: UpdateTagInput = match parse(input_json) {
+        Ok(v) => v,
+        Err(cm) => return fail(out_json, cm.0, cm.1),
+    };
+    match eng.update_tag(
+        TagId::from(input.tag_id),
+        input.display_name.as_deref(),
+        input.description.as_deref(),
+    ) {
+        Ok(t) => ok_json(out_json, json!(t)),
+        Err(e) => fail(out_json, NUCLEUS_ERR_ENGINE, e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+struct TagRef {
+    tag_id: u64,
+}
+
+/// Delete a label, detaching it from chunks/documents (which survive). Input:
+/// `{"tag_id":N}`. Output: `{"deleted":true}`.
+///
+/// # Safety
+/// See module docs.
+#[no_mangle]
+pub unsafe extern "C" fn nucleus_delete_tag(
+    handle: *mut Engine,
+    input_json: *const c_char,
+    out_json: *mut *mut c_char,
+) -> i32 {
+    let Some(eng) = engine(handle) else {
+        return fail(out_json, NUCLEUS_ERR_NULL_ARG, "engine handle is null".into());
+    };
+    let input: TagRef = match parse(input_json) {
+        Ok(v) => v,
+        Err(cm) => return fail(out_json, cm.0, cm.1),
+    };
+    match eng.delete_tag(TagId::from(input.tag_id)) {
+        Ok(()) => ok_json(out_json, json!({ "deleted": true })),
+        Err(e) => fail(out_json, NUCLEUS_ERR_ENGINE, e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+struct UpdateDocumentInput {
+    document_id: u64,
+    /// New label set (by name, get-or-create). Omit to leave tags unchanged.
+    #[serde(default)]
+    labels: Option<Vec<String>>,
+    /// New subdomain name (get-or-create). Omit + `clear_subdomain:false` leaves
+    /// it unchanged; set `clear_subdomain:true` to remove the subdomain.
+    #[serde(default)]
+    subdomain: Option<String>,
+    #[serde(default)]
+    clear_subdomain: bool,
+}
+
+/// Re-assign a document's labels and/or subdomain (propagated to its chunks).
+/// Input: `{"document_id":N,"labels":["a"],"subdomain":"x"}`. Output: `Document`.
+///
+/// # Safety
+/// See module docs.
+#[no_mangle]
+pub unsafe extern "C" fn nucleus_update_document(
+    handle: *mut Engine,
+    input_json: *const c_char,
+    out_json: *mut *mut c_char,
+) -> i32 {
+    let Some(eng) = engine(handle) else {
+        return fail(out_json, NUCLEUS_ERR_NULL_ARG, "engine handle is null".into());
+    };
+    let input: UpdateDocumentInput = match parse(input_json) {
+        Ok(v) => v,
+        Err(cm) => return fail(out_json, cm.0, cm.1),
+    };
+    let doc_id = DocumentId::from(input.document_id);
+    // We need the owning domain to resolve label/subdomain names.
+    let domain_id = match eng.get_document(doc_id) {
+        Ok(d) => d.domain_id,
+        Err(e) => return fail(out_json, NUCLEUS_ERR_ENGINE, e.to_string()),
+    };
+
+    let new_tags = match &input.labels {
+        Some(names) => {
+            let mut ids = Vec::with_capacity(names.len());
+            for name in names {
+                match eng.get_or_create_label(domain_id, name) {
+                    Ok(t) => ids.push(t.id),
+                    Err(e) => return fail(out_json, NUCLEUS_ERR_ENGINE, e.to_string()),
+                }
+            }
+            Some(ids)
+        }
+        None => None,
+    };
+
+    let change_subdomain = input.clear_subdomain || input.subdomain.is_some();
+    let new_subdomain = match &input.subdomain {
+        Some(name) if !input.clear_subdomain => match eng.get_or_create_subdomain(domain_id, name, "") {
+            Ok(s) => Some(s.id),
+            Err(e) => return fail(out_json, NUCLEUS_ERR_ENGINE, e.to_string()),
+        },
+        _ => None, // clearing, or no change requested
+    };
+
+    match eng.update_document(doc_id, new_tags, new_subdomain, change_subdomain) {
+        Ok(d) => ok_json(out_json, json!(d)),
+        Err(e) => fail(out_json, NUCLEUS_ERR_ENGINE, e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+struct ReindexInput {
+    domain_id: u64,
+    /// Switch to a new embedding model (changes the dimension). Omit to re-embed
+    /// with the current model.
+    #[serde(default)]
+    model: Option<String>,
+}
+
+/// Re-embed every chunk of a domain and rebuild its vector index (blocking).
+/// Input: `{"domain_id":N,"model":null}`. Output: `{"reindexed":N}`.
+///
+/// # Safety
+/// See module docs.
+#[no_mangle]
+pub unsafe extern "C" fn nucleus_reindex_domain(
+    handle: *mut Engine,
+    input_json: *const c_char,
+    out_json: *mut *mut c_char,
+) -> i32 {
+    let Some(eng) = engine(handle) else {
+        return fail(out_json, NUCLEUS_ERR_NULL_ARG, "engine handle is null".into());
+    };
+    let input: ReindexInput = match parse(input_json) {
+        Ok(v) => v,
+        Err(cm) => return fail(out_json, cm.0, cm.1),
+    };
+    match eng.reindex_domain(DomainId::from(input.domain_id), input.model.as_deref()) {
+        Ok(n) => ok_json(out_json, json!({ "reindexed": n })),
+        Err(e) => fail(out_json, NUCLEUS_ERR_ENGINE, e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+struct SearchMultiInput {
+    /// Domains to search together. All must share the same embedding model/dim.
+    domain_ids: Vec<u64>,
+    query: String,
+    #[serde(default = "default_k")]
+    k: usize,
+    #[serde(default)]
+    filter: Option<String>,
+    #[serde(default)]
+    diversity: f32,
+}
+
+/// Search several domains at once (they must share a model). Input:
+/// `{"domain_ids":[1,2],"query":"...","k":10}`. Output: `{"hits":[...]}`.
+///
+/// # Safety
+/// See module docs.
+#[no_mangle]
+pub unsafe extern "C" fn nucleus_search_multi(
+    handle: *mut Engine,
+    input_json: *const c_char,
+    out_json: *mut *mut c_char,
+) -> i32 {
+    let Some(eng) = engine(handle) else {
+        return fail(out_json, NUCLEUS_ERR_NULL_ARG, "engine handle is null".into());
+    };
+    let input: SearchMultiInput = match parse(input_json) {
+        Ok(v) => v,
+        Err(cm) => return fail(out_json, cm.0, cm.1),
+    };
+    let domain_ids: Vec<DomainId> = input.domain_ids.into_iter().map(DomainId::from).collect();
+    let req = SearchRequest {
+        query: QueryInput::Text(input.query),
+        k: input.k,
+        tags: Vec::new(),
+        match_all: false,
+        document_ids: Vec::new(),
+        subdomain: None,
+        filter: input.filter,
+        diversity: input.diversity,
+    };
+    match eng.search_multi(&domain_ids, req) {
+        Ok(hits) => {
+            let out: Vec<HitOut> = hits
+                .into_iter()
+                .map(|h| HitOut { chunk: h.chunk, score: h.score, snippet: h.snippet })
+                .collect();
+            ok_json(out_json, json!({ "hits": out }))
+        }
         Err(e) => fail(out_json, NUCLEUS_ERR_ENGINE, e.to_string()),
     }
 }

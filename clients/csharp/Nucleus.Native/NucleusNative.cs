@@ -74,7 +74,8 @@ public sealed class NucleusEngine : IDisposable
             subdomain,
         });
 
-    /// <summary>Search a domain by text. Returns <c>{ "hits": [ { chunk, score } ] }</c>.</summary>
+    /// <summary>Search a domain by text. Returns <c>{ "hits": [ { chunk, score, snippet? } ] }</c>.</summary>
+    /// <param name="diversity">MMR diversity in [0,1]; 0 = pure relevance.</param>
     public JsonDocument Search(
         ulong domainId,
         string query,
@@ -83,7 +84,8 @@ public sealed class NucleusEngine : IDisposable
         bool matchAll = false,
         IEnumerable<ulong>? documentIds = null,
         string? subdomain = null,
-        string? filter = null) =>
+        string? filter = null,
+        float diversity = 0f) =>
         Call(nucleus_search, new
         {
             domain_id = domainId,
@@ -94,7 +96,17 @@ public sealed class NucleusEngine : IDisposable
             document_ids = documentIds,
             subdomain,
             filter,
+            diversity,
         });
+
+    /// <summary>Search several domains at once (they must share a model).</summary>
+    public JsonDocument SearchMulti(
+        IEnumerable<ulong> domainIds,
+        string query,
+        int k = 10,
+        string? filter = null,
+        float diversity = 0f) =>
+        Call(nucleus_search_multi, new { domain_ids = domainIds, query, k, filter, diversity });
 
     /// <summary>Persist on-disk (HNSW) index dumps. No-op for the flat index.</summary>
     public JsonDocument PersistIndexes()
@@ -133,6 +145,46 @@ public sealed class NucleusEngine : IDisposable
     /// <summary>A chunk plus its neighbours. Returns <c>{ "chunks": [ ... ] }</c>.</summary>
     public JsonDocument ChunkContext(ulong chunkId, int before = 1, int after = 1) =>
         Call(nucleus_chunk_context, new { chunk_id = chunkId, before, after });
+
+    // --- edit / delete (cascade) ------------------------------------------
+
+    /// <summary>Rename a domain. Returns the updated <c>Domain</c>.</summary>
+    public JsonDocument RenameDomain(ulong domainId, string name) =>
+        Call(nucleus_rename_domain, new { domain_id = domainId, name });
+
+    /// <summary>Delete a domain and everything under it. Returns <c>{ "deleted": true }</c>.</summary>
+    public JsonDocument DeleteDomain(ulong domainId) =>
+        Call(nucleus_delete_domain, new { domain_id = domainId });
+
+    /// <summary>Delete a subdomain and cascade to its documents. Returns <c>{ "deleted": true }</c>.</summary>
+    public JsonDocument DeleteSubdomain(ulong subdomainId) =>
+        Call(nucleus_delete_subdomain, new { subdomain_id = subdomainId });
+
+    /// <summary>Update a label's display name and/or description. Returns the <c>Tag</c>.</summary>
+    public JsonDocument UpdateTag(ulong tagId, string? displayName = null, string? description = null) =>
+        Call(nucleus_update_tag, new { tag_id = tagId, display_name = displayName, description });
+
+    /// <summary>Delete a label, detaching it from chunks/documents. Returns <c>{ "deleted": true }</c>.</summary>
+    public JsonDocument DeleteTag(ulong tagId) =>
+        Call(nucleus_delete_tag, new { tag_id = tagId });
+
+    /// <summary>Re-assign a document's labels and/or subdomain. Returns the <c>Document</c>.</summary>
+    public JsonDocument UpdateDocument(
+        ulong documentId,
+        IEnumerable<string>? labels = null,
+        string? subdomain = null,
+        bool clearSubdomain = false) =>
+        Call(nucleus_update_document, new
+        {
+            document_id = documentId,
+            labels,
+            subdomain,
+            clear_subdomain = clearSubdomain,
+        });
+
+    /// <summary>Re-embed a domain and rebuild its index (blocking). Returns <c>{ "reindexed": N }</c>.</summary>
+    public JsonDocument ReindexDomain(ulong domainId, string? model = null) =>
+        Call(nucleus_reindex_domain, new { domain_id = domainId, model });
 
     public void Dispose()
     {
@@ -210,6 +262,30 @@ public sealed class NucleusEngine : IDisposable
 
     [DllImport(Dll, CharSet = CharSet.Ansi)]
     private static extern int nucleus_chunk_context(IntPtr handle, string inputJson, out IntPtr outJson);
+
+    [DllImport(Dll, CharSet = CharSet.Ansi)]
+    private static extern int nucleus_search_multi(IntPtr handle, string inputJson, out IntPtr outJson);
+
+    [DllImport(Dll, CharSet = CharSet.Ansi)]
+    private static extern int nucleus_rename_domain(IntPtr handle, string inputJson, out IntPtr outJson);
+
+    [DllImport(Dll, CharSet = CharSet.Ansi)]
+    private static extern int nucleus_delete_domain(IntPtr handle, string inputJson, out IntPtr outJson);
+
+    [DllImport(Dll, CharSet = CharSet.Ansi)]
+    private static extern int nucleus_delete_subdomain(IntPtr handle, string inputJson, out IntPtr outJson);
+
+    [DllImport(Dll, CharSet = CharSet.Ansi)]
+    private static extern int nucleus_update_tag(IntPtr handle, string inputJson, out IntPtr outJson);
+
+    [DllImport(Dll, CharSet = CharSet.Ansi)]
+    private static extern int nucleus_delete_tag(IntPtr handle, string inputJson, out IntPtr outJson);
+
+    [DllImport(Dll, CharSet = CharSet.Ansi)]
+    private static extern int nucleus_update_document(IntPtr handle, string inputJson, out IntPtr outJson);
+
+    [DllImport(Dll, CharSet = CharSet.Ansi)]
+    private static extern int nucleus_reindex_domain(IntPtr handle, string inputJson, out IntPtr outJson);
 
     [DllImport(Dll)]
     private static extern void nucleus_string_free(IntPtr s);

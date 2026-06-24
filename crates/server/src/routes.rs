@@ -640,6 +640,7 @@ async fn run_search(
         document_ids: document_ids.into_iter().map(DocumentId::new).collect(),
         subdomain: subdomain_id,
         filter,
+        diversity: 0.0,
     };
     let started = std::time::Instant::now();
     let engine = st.engine.current();

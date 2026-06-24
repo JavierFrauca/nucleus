@@ -153,28 +153,38 @@ impl VectorIndex for HnswIndex {
         if k == 0 || query.len() != self.dim || total == 0 {
             return Vec::new();
         }
-        // Over-fetch to absorb tombstones and the post-filter intersection.
-        let want = (k.saturating_mul(4) + self.tombstones.len()).clamp(1, total);
-        let ef = want.max(64);
-        let neighbours = self.with_graph(|h| h.search(query, want, ef));
+        // Over-fetch to absorb tombstones and the post-filter intersection. With
+        // a selective `allowed` filter the wanted ids can rank far down the
+        // global order, so when a pass falls short we **escalate** the fetch
+        // (doubling, capped at the graph size) until we have `k` survivors or we
+        // have effectively scanned the whole graph. Without a filter one pass is
+        // enough. HNSW lacks filtered traversal, so this is the pragmatic fix.
+        let mut want = (k.saturating_mul(4) + self.tombstones.len()).clamp(1, total);
+        loop {
+            let ef = want.max(64);
+            let neighbours = self.with_graph(|h| h.search(query, want, ef));
 
-        let mut out = Vec::with_capacity(k);
-        for neighbour in neighbours {
-            let id = ChunkId::new(neighbour.d_id as u64);
-            if self.tombstones.contains(&id) {
-                continue;
-            }
-            if let Some(set) = allowed {
-                if !set.contains(&id) {
+            let mut out = Vec::with_capacity(k);
+            for neighbour in neighbours {
+                let id = ChunkId::new(neighbour.d_id as u64);
+                if self.tombstones.contains(&id) {
                     continue;
                 }
+                if let Some(set) = allowed {
+                    if !set.contains(&id) {
+                        continue;
+                    }
+                }
+                out.push((id, 1.0 - neighbour.distance)); // distance = 1 - cosine
+                if out.len() >= k {
+                    break;
+                }
             }
-            out.push((id, 1.0 - neighbour.distance)); // distance = 1 - cosine
-            if out.len() >= k {
-                break;
+            if out.len() >= k || allowed.is_none() || want >= total {
+                return out;
             }
+            want = want.saturating_mul(2).min(total);
         }
-        out
     }
 
     fn persist(&self, dir: &Path, name: &str) -> Result<bool> {
@@ -212,6 +222,23 @@ mod tests {
             .search(&[1.0, 0.0], 5, None)
             .iter()
             .all(|(c, _)| *c != id(1)));
+    }
+
+    #[test]
+    fn filtered_search_escalates_to_find_allowed() {
+        let mut ix = HnswIndex::new(2);
+        // Near-axis vectors; the allowed set is a few of the *last* ones, which a
+        // single small over-fetch (k*4) ranks too far down to reach — only the
+        // escalation pass surfaces them. (HNSW is approximate, so we assert the
+        // invariants — results are within the filter and non-empty — rather than
+        // exact recall, which an ANN index can't guarantee.)
+        for i in 1..=20u64 {
+            ix.upsert(id(i), &[1.0, i as f32 * 0.01]).unwrap();
+        }
+        let allowed: HashSet<ChunkId> = [id(18), id(19), id(20)].into_iter().collect();
+        let hits = ix.search(&[1.0, 0.0], 3, Some(&allowed));
+        assert!(!hits.is_empty(), "escalation should surface allowed items");
+        assert!(hits.iter().all(|(c, _)| allowed.contains(c)));
     }
 
     #[test]

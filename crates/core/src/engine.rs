@@ -3,10 +3,12 @@
 //! [`crate::jobs`]) drives `populate_document` on background workers.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::hash::Hash;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 
 use crate::auth::{self, ApiToken, AuthContext, Scope};
 use crate::chunking::{Chunker, FixedSizeChunker};
@@ -44,6 +46,180 @@ fn rrf_fuse(lists: &[Vec<(ChunkId, f32)>], k: usize) -> Vec<(ChunkId, f32)> {
     fused
 }
 
+/// Lower-case a char to a single char (best-effort: takes the first scalar of
+/// its Unicode lowercase mapping), keeping a 1:1 char alignment with the source
+/// so positions found in the lowered copy map back to the original.
+fn lower1(c: char) -> char {
+    c.to_lowercase().next().unwrap_or(c)
+}
+
+/// Find the first index at which `needle` occurs in `haystack` (both as char
+/// slices). Naive search — needles are short query terms.
+fn find_subslice(haystack: &[char], needle: &[char]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    (0..=haystack.len() - needle.len()).find(|&i| haystack[i..i + needle.len()] == *needle)
+}
+
+/// Build a short **snippet** of `text` centred on the earliest query-term match,
+/// padded by `radius` characters and elided with `…`. Case-insensitive. Returns
+/// `None` when the query has no usable terms or none of them appear in the text
+/// (e.g. a purely semantic match), in which case the caller keeps the full text.
+fn snippet(text: &str, query: &str, radius: usize) -> Option<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let lower: Vec<char> = chars.iter().map(|c| lower1(*c)).collect();
+    let terms: Vec<Vec<char>> = query
+        .split_whitespace()
+        .filter(|t| t.chars().count() >= 2)
+        .map(|t| t.chars().map(lower1).collect())
+        .collect();
+    if terms.is_empty() {
+        return None;
+    }
+    let pos = terms
+        .iter()
+        .filter_map(|t| find_subslice(&lower, t))
+        .min()?;
+    let start = pos.saturating_sub(radius);
+    let end = (pos + radius).min(chars.len());
+    let mut out = String::new();
+    if start > 0 {
+        out.push('…');
+    }
+    out.extend(&chars[start..end]);
+    if end < chars.len() {
+        out.push('…');
+    }
+    Some(out)
+}
+
+/// Cosine similarity of two vectors. Returns `0.0` if either is empty or
+/// zero-norm (degenerate), so it never produces `NaN`.
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    let mut dot = 0.0f32;
+    let mut na = 0.0f32;
+    let mut nb = 0.0f32;
+    for i in 0..a.len().min(b.len()) {
+        dot += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+    }
+    if na == 0.0 || nb == 0.0 {
+        0.0
+    } else {
+        dot / (na.sqrt() * nb.sqrt())
+    }
+}
+
+/// Re-rank `items` with **Maximal Marginal Relevance**, returning the top-`k`.
+///
+/// At each step it picks the candidate maximising
+/// `lambda * relevance - (1 - lambda) * max_similarity_to_already_picked`,
+/// where relevance is the incoming score min-max normalised to `[0, 1]` (so it
+/// mixes sanely with cosine similarity) and similarity uses the candidate
+/// embeddings in `embs` (a missing embedding counts as zero similarity).
+/// `lambda == 1` is pure relevance; `lambda == 0` is pure diversity. The
+/// reported score stays the original relevance.
+fn mmr_select(
+    items: Vec<(Chunk, f32)>,
+    embs: &HashMap<ChunkId, Vec<f32>>,
+    lambda: f32,
+    k: usize,
+) -> Vec<(Chunk, f32)> {
+    let n = items.len();
+    let target = k.min(n);
+    if target == 0 {
+        return Vec::new();
+    }
+    // Normalise relevance to [0, 1].
+    let (min, max) = items
+        .iter()
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), (_, s)| {
+            (lo.min(*s), hi.max(*s))
+        });
+    let span = (max - min).max(f32::EPSILON);
+    let rel: Vec<f32> = items.iter().map(|(_, s)| (s - min) / span).collect();
+    let empty: Vec<f32> = Vec::new();
+    let emb = |i: usize| embs.get(&items[i].0.id).unwrap_or(&empty);
+
+    let mut chosen: Vec<usize> = Vec::with_capacity(target);
+    let mut remaining: Vec<usize> = (0..n).collect();
+    while chosen.len() < target && !remaining.is_empty() {
+        let mut best_pos = 0;
+        let mut best_score = f32::NEG_INFINITY;
+        for (pos, &i) in remaining.iter().enumerate() {
+            let max_sim = chosen
+                .iter()
+                .map(|&j| cosine(emb(i), emb(j)))
+                .fold(0.0f32, f32::max);
+            let score = lambda * rel[i] - (1.0 - lambda) * max_sim;
+            if score > best_score {
+                best_score = score;
+                best_pos = pos;
+            }
+        }
+        chosen.push(remaining.remove(best_pos));
+    }
+    // Reassemble in the chosen order, preserving each chunk's original score.
+    let mut slots: Vec<Option<(Chunk, f32)>> = items.into_iter().map(Some).collect();
+    chosen.into_iter().filter_map(|i| slots[i].take()).collect()
+}
+
+/// A tiny bounded **LRU** cache. Recency is tracked with a monotonic tick;
+/// eviction scans for the smallest tick — O(n) but only on a miss-insert into a
+/// full cache, and `n` (the cap) is small relative to the cost of the work being
+/// cached (an embedding inference), so it never dominates.
+struct LruCache<K, V> {
+    cap: usize,
+    tick: u64,
+    map: HashMap<K, (V, u64)>,
+}
+
+impl<K: Eq + Hash + Clone, V: Clone> LruCache<K, V> {
+    fn new(cap: usize) -> Self {
+        Self {
+            cap: cap.max(1),
+            tick: 0,
+            map: HashMap::new(),
+        }
+    }
+
+    /// Fetch a clone of the value for `k`, bumping its recency.
+    fn get(&mut self, k: &K) -> Option<V> {
+        match self.map.get_mut(k) {
+            Some(entry) => {
+                self.tick += 1;
+                entry.1 = self.tick;
+                Some(entry.0.clone())
+            }
+            None => None,
+        }
+    }
+
+    /// Insert/replace `k`, evicting the least-recently-used entry if full.
+    fn put(&mut self, k: K, v: V) {
+        self.tick += 1;
+        let t = self.tick;
+        if !self.map.contains_key(&k) && self.map.len() >= self.cap {
+            if let Some(old) = self
+                .map
+                .iter()
+                .min_by_key(|(_, (_, t))| *t)
+                .map(|(k, _)| k.clone())
+            {
+                self.map.remove(&old);
+            }
+        }
+        self.map.insert(k, (v, t));
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.map.len()
+    }
+}
+
 /// The body of an ingest request: either raw text (the engine chunks it) or
 /// already-split chunks.
 pub enum IngestBody {
@@ -78,12 +254,19 @@ pub struct SearchRequest {
     pub subdomain: Option<SubdomainId>,
     /// Optional [query-language](crate::query) filter, ANDed with the above.
     pub filter: Option<String>,
+    /// Result diversity via Maximal Marginal Relevance, in `[0, 1]`. `0`
+    /// (default) disables it (pure relevance order); higher values trade
+    /// relevance for less redundancy among the returned chunks.
+    pub diversity: f32,
 }
 
 /// One ranked result.
 pub struct SearchHit {
     pub chunk: Chunk,
     pub score: f32,
+    /// A short excerpt of the chunk centred on the matched query terms, when the
+    /// query is text and a term was found; `None` otherwise (keep the full text).
+    pub snippet: Option<String>,
 }
 
 /// Result of ingesting a document synchronously.
@@ -108,6 +291,15 @@ pub struct Engine {
     reranker: RwLock<Option<Arc<dyn Reranker>>>,
     /// How many top fused candidates the reranker re-scores.
     rerank_candidates: RwLock<usize>,
+    /// Last-used timestamps per token (operational telemetry). In memory only —
+    /// updating it on the auth hot path must not cost a disk write; it resets on
+    /// restart.
+    last_used: RwLock<HashMap<TokenId, i64>>,
+    /// Whether the query-embedding cache is on (checked lock-free on the hot path).
+    query_cache_on: AtomicBool,
+    /// LRU cache of query embeddings, keyed by `model\u{1f}text`. The expensive
+    /// inference runs **outside** this lock, so contention is microsecond-scale.
+    embed_cache: Mutex<Option<LruCache<String, Vec<f32>>>>,
 }
 
 /// A swappable holder for the live [`Engine`], so the engine can be replaced
@@ -170,6 +362,9 @@ impl Engine {
             index_dir,
             reranker: RwLock::new(None),
             rerank_candidates: RwLock::new(DEFAULT_RERANK_CANDIDATES),
+            last_used: RwLock::new(HashMap::new()),
+            query_cache_on: AtomicBool::new(false),
+            embed_cache: Mutex::new(None),
         };
         engine.load_all_indexes()?;
         Ok(engine)
@@ -189,6 +384,36 @@ impl Engine {
     /// Higher = better ordering but slower; clamped to at least 1.
     pub fn set_rerank_candidates(&self, n: usize) {
         *self.rerank_candidates.write() = n.max(1);
+    }
+
+    /// Enable (or resize) the query-embedding cache to hold up to `cap` entries.
+    /// `cap == 0` disables it. Embedding the same query text (e.g. popular or
+    /// repeated searches) then skips the CPU-bound inference, raising throughput.
+    pub fn set_query_cache(&self, cap: usize) {
+        if cap == 0 {
+            self.query_cache_on.store(false, Ordering::Relaxed);
+            *self.embed_cache.lock() = None;
+        } else {
+            *self.embed_cache.lock() = Some(LruCache::new(cap));
+            self.query_cache_on.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Embed a query, consulting the cache when enabled. The inference runs
+    /// outside the cache lock so concurrent misses don't serialise.
+    fn embed_query_cached(&self, model: &str, text: &str) -> Result<Vec<f32>> {
+        if !self.query_cache_on.load(Ordering::Relaxed) {
+            return self.embedder.embed_query(model, text);
+        }
+        let key = format!("{model}\u{1f}{text}");
+        if let Some(v) = self.embed_cache.lock().as_mut().and_then(|c| c.get(&key)) {
+            return Ok(v);
+        }
+        let v = self.embedder.embed_query(model, text)?;
+        if let Some(c) = self.embed_cache.lock().as_mut() {
+            c.put(key, v.clone());
+        }
+        Ok(v)
     }
 
     fn load_all_indexes(&self) -> Result<()> {
@@ -520,6 +745,110 @@ impl Engine {
         Ok(())
     }
 
+    /// Rename a domain.
+    pub fn rename_domain(&self, id: DomainId, name: &str) -> Result<Domain> {
+        self.storage.rename_domain(id, name)
+    }
+
+    /// Delete a domain and everything under it, discarding its in-memory vector
+    /// and lexical indexes.
+    pub fn delete_domain(&self, id: DomainId) -> Result<()> {
+        self.storage.delete_domain(id)?;
+        self.indexes.write().remove(&id);
+        self.lexical.write().remove(&id);
+        Ok(())
+    }
+
+    /// Delete a subdomain, cascade-deleting its documents and dropping their
+    /// chunks from the in-memory indexes.
+    pub fn delete_subdomain(&self, id: SubdomainId) -> Result<()> {
+        let sub = self.storage.get_subdomain(id)?;
+        let removed = self.storage.delete_subdomain(id)?;
+        if let Some(ix) = self.indexes.write().get_mut(&sub.domain_id) {
+            for cid in &removed {
+                ix.remove(*cid);
+            }
+        }
+        if let Some(li) = self.lexical.write().get_mut(&sub.domain_id) {
+            for cid in &removed {
+                li.remove(*cid);
+            }
+        }
+        Ok(())
+    }
+
+    /// Update a label's display name / description.
+    pub fn update_tag(
+        &self,
+        id: TagId,
+        display_name: Option<&str>,
+        description: Option<&str>,
+    ) -> Result<Tag> {
+        self.storage.update_tag(id, display_name, description)
+    }
+
+    /// Delete a label, detaching it from chunks and documents (which survive).
+    /// No index change: embeddings are untouched.
+    pub fn delete_tag(&self, id: TagId) -> Result<()> {
+        self.storage.delete_tag(id)
+    }
+
+    /// Re-assign a document's tags and/or subdomain, propagated to its chunks.
+    /// The in-memory indexes are unaffected (only tags/subdomain change).
+    pub fn update_document(
+        &self,
+        id: DocumentId,
+        new_tags: Option<Vec<TagId>>,
+        new_subdomain: Option<SubdomainId>,
+        change_subdomain: bool,
+    ) -> Result<Document> {
+        self.storage
+            .update_document(id, new_tags, new_subdomain, change_subdomain)
+    }
+
+    /// Whether the embedder knows `model` (used to validate a reindex request).
+    pub fn supports_model(&self, model: &str) -> bool {
+        self.embedder.dim(model).is_some()
+    }
+
+    /// Re-embed every chunk of a domain (optionally switching to `new_model`,
+    /// which changes the dimension) and rebuild its vector index. **Blocking**
+    /// (runs inference). The lexical index is untouched (texts are unchanged).
+    /// Returns the number of chunks re-embedded.
+    pub fn reindex_domain(&self, domain_id: DomainId, new_model: Option<&str>) -> Result<usize> {
+        let domain = self.get_domain(domain_id)?;
+        let model = new_model.unwrap_or(&domain.model).to_string();
+        let dim = self
+            .embedder
+            .dim(&model)
+            .ok_or_else(|| NucleusError::ModelNotFound(model.clone()))?;
+        if model != domain.model || dim != domain.dim {
+            self.storage.set_domain_model(domain_id, &model, dim)?;
+        }
+        // Re-embed all chunk texts in bounded windows, into a fresh index.
+        const EMBED_BATCH: usize = 64;
+        let texts = self.storage.texts_in_domain(domain_id)?;
+        let mut new_index = build_index(self.index_kind, dim);
+        let mut count = 0usize;
+        for window in texts.chunks(EMBED_BATCH) {
+            let inputs: Vec<String> = window.iter().map(|(_, t)| t.clone()).collect();
+            let vectors = self.embedder.embed_documents(&model, &inputs)?;
+            if vectors.len() != window.len() {
+                return Err(NucleusError::embedding_msg(
+                    "reindex: embedder returned a different number of vectors than inputs",
+                ));
+            }
+            for ((cid, _), v) in window.iter().zip(&vectors) {
+                self.storage.set_embedding(*cid, v)?;
+                new_index.upsert(*cid, v)?;
+                count += 1;
+            }
+        }
+        // Swap the rebuilt index in for the domain.
+        self.indexes.write().insert(domain_id, new_index);
+        Ok(count)
+    }
+
     // --- search ------------------------------------------------------------
 
     /// Retrieve the top-`k` chunks in a domain for a query, applying tag and
@@ -534,8 +863,11 @@ impl Engine {
             document_ids,
             subdomain,
             filter,
+            diversity,
         } = req;
         let k = k.min(MAX_K);
+        let diversity = diversity.clamp(0.0, 1.0);
+        let do_mmr = diversity > 0.0;
 
         let (query_vec, query_text) = match query {
             QueryInput::Vector(v) => {
@@ -547,9 +879,7 @@ impl Engine {
                 }
                 (v, None)
             }
-            QueryInput::Text(text) => {
-                (self.embedder.embed_query(&domain.model, &text)?, Some(text))
-            }
+            QueryInput::Text(text) => (self.embed_query_cached(&domain.model, &text)?, Some(text)),
             QueryInput::Hybrid { text, vector } => {
                 if vector.len() != domain.dim {
                     return Err(NucleusError::DimensionMismatch {
@@ -570,9 +900,12 @@ impl Engine {
         let reranker = self.reranker.read().clone();
         let do_rerank = reranker.is_some() && query_text.is_some();
         // When reranking, re-score a bounded candidate window (the cross-encoder
-        // is costly per pair): at least `k`, at most what we fetched.
+        // is costly per pair): at least `k`, at most what we fetched. MMR also
+        // needs a pool wider than `k` to have anything to diversify from.
         let window = if do_rerank {
             (*self.rerank_candidates.read()).clamp(k, fetch)
+        } else if do_mmr {
+            fetch
         } else {
             k
         };
@@ -616,32 +949,125 @@ impl Engine {
             }
         }
 
-        // Optional second stage: cross-encoder rerank, then take the top-k.
-        let hits = match (do_rerank, reranker, &query_text) {
+        // For MMR we need the candidate embeddings; fetch them (aligned by chunk
+        // id) before the window is consumed by reranking.
+        let cand_embs: HashMap<ChunkId, Vec<f32>> = if do_mmr {
+            items
+                .iter()
+                .filter_map(|(c, _)| self.storage.get_embedding(c.id).ok().map(|e| (c.id, e)))
+                .collect()
+        } else {
+            HashMap::new()
+        };
+
+        // Stage 2: optional cross-encoder rerank, which re-scores the window.
+        let mut scored: Vec<(Chunk, f32)> = match (do_rerank, reranker, &query_text) {
             (true, Some(reranker), Some(text)) => {
                 let docs: Vec<String> = items.iter().map(|(c, _)| c.text.clone()).collect();
                 let scores = reranker.rerank(text, &docs)?;
-                let mut reranked: Vec<(Chunk, f32)> = items
+                items
                     .into_iter()
                     .zip(scores)
                     .map(|((chunk, _), score)| (chunk, score))
-                    .collect();
-                reranked.sort_by(|a, b| b.1.total_cmp(&a.1));
-                reranked.truncate(k);
-                reranked
-                    .into_iter()
-                    .map(|(chunk, score)| SearchHit { chunk, score })
                     .collect()
             }
-            _ => {
-                items.truncate(k);
-                items
-                    .into_iter()
-                    .map(|(chunk, score)| SearchHit { chunk, score })
-                    .collect()
-            }
+            _ => items,
         };
-        Ok(hits)
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+        // Stage 3: either diversify with MMR or take a plain top-`k`.
+        let selected = if do_mmr {
+            mmr_select(scored, &cand_embs, 1.0 - diversity, k)
+        } else {
+            scored.truncate(k);
+            scored
+        };
+        let qt = query_text.as_deref();
+        Ok(selected
+            .into_iter()
+            .map(|(chunk, score)| {
+                let snippet = qt.and_then(|q| snippet(&chunk.text, q, 120));
+                SearchHit {
+                    chunk,
+                    score,
+                    snippet,
+                }
+            })
+            .collect())
+    }
+
+    /// Search several domains of the **same model/dimension** in one call,
+    /// merging their results by score into the global top-`k`. Per-domain id
+    /// filters (tags, document_ids, subdomain) don't generalise across domains,
+    /// so only `query`, `k`, `filter` (by tag name) and `diversity` are honoured.
+    pub fn search_multi(
+        &self,
+        domain_ids: &[DomainId],
+        req: SearchRequest,
+    ) -> Result<Vec<SearchHit>> {
+        if domain_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        // All domains must agree on model/dimension.
+        let mut model: Option<(String, usize)> = None;
+        for id in domain_ids {
+            let d = self.get_domain(*id)?;
+            match &model {
+                None => model = Some((d.model.clone(), d.dim)),
+                Some((m, dim)) => {
+                    if *m != d.model || *dim != d.dim {
+                        return Err(NucleusError::invalid(
+                            "multi-domain search requires all domains to share the same model",
+                        ));
+                    }
+                }
+            }
+        }
+        let (model, _dim) = model.expect("non-empty domain_ids");
+
+        let SearchRequest {
+            query,
+            k,
+            filter,
+            diversity,
+            ..
+        } = req;
+        // Materialise the query once (embed any text query a single time).
+        let (text, vector) = match query {
+            QueryInput::Text(t) => {
+                let v = self.embed_query_cached(&model, &t)?;
+                (Some(t), v)
+            }
+            QueryInput::Vector(v) => (None, v),
+            QueryInput::Hybrid { text, vector } => (Some(text), vector),
+        };
+
+        let mut all: Vec<SearchHit> = Vec::new();
+        for id in domain_ids {
+            let q = match &text {
+                Some(t) => QueryInput::Hybrid {
+                    text: t.clone(),
+                    vector: vector.clone(),
+                },
+                None => QueryInput::Vector(vector.clone()),
+            };
+            all.extend(self.search(
+                *id,
+                SearchRequest {
+                    query: q,
+                    k,
+                    tags: vec![],
+                    match_all: false,
+                    document_ids: vec![],
+                    subdomain: None,
+                    filter: filter.clone(),
+                    diversity,
+                },
+            )?);
+        }
+        all.sort_by(|a, b| b.score.total_cmp(&a.score));
+        all.truncate(k.min(MAX_K));
+        Ok(all)
     }
 
     // --- tokens / auth -----------------------------------------------------
@@ -658,10 +1084,18 @@ impl Engine {
                 return Err(NucleusError::Unauthorized);
             }
         }
+        // Record last-used (in memory; cheap, no disk write on the hot path).
+        self.last_used.write().insert(token.id, now_millis());
         Ok(AuthContext {
             token_id: token.id,
             scopes: token.scopes,
         })
+    }
+
+    /// Last time a token authenticated successfully (in-memory; `None` if it
+    /// hasn't been used since the server started).
+    pub fn token_last_used(&self, id: TokenId) -> Option<i64> {
+        self.last_used.read().get(&id).copied()
     }
 
     /// Create a token, returning the stored record and the plaintext (shown once).
@@ -674,6 +1108,20 @@ impl Engine {
         let (plaintext, hash) = auth::generate_token();
         let token = self.storage.create_token(name, hash, scopes, expires_at)?;
         Ok((token, plaintext))
+    }
+
+    /// Rotate a token's secret: mint a fresh plaintext/hash for the same id,
+    /// scopes and expiry, invalidating the old secret. Returns the updated record
+    /// and the new plaintext (shown once).
+    pub fn rotate_token(&self, id: TokenId) -> Result<(ApiToken, String)> {
+        let (plaintext, hash) = auth::generate_token();
+        match self.storage.rotate_token(id, hash)? {
+            Some(token) => {
+                self.last_used.write().remove(&id);
+                Ok((token, plaintext))
+            }
+            None => Err(NucleusError::invalid("token not found")),
+        }
     }
 
     pub fn list_tokens(&self) -> Result<Vec<ApiToken>> {
@@ -834,6 +1282,7 @@ mod tests {
                     document_ids: vec![],
                     subdomain: None,
                     filter: None,
+                    diversity: 0.0,
                 },
             )
             .unwrap();
@@ -877,6 +1326,7 @@ mod tests {
                     document_ids: vec![],
                     subdomain: None,
                     filter: None,
+                    diversity: 0.0,
                 },
             )
             .unwrap();
@@ -919,6 +1369,7 @@ mod tests {
                     document_ids: vec![],
                     subdomain: None,
                     filter: Some(filter.to_string()),
+                    diversity: 0.0,
                 },
             )
             .unwrap()
@@ -944,6 +1395,7 @@ mod tests {
                     document_ids: vec![],
                     subdomain: None,
                     filter: Some("doc:abc".into()),
+                    diversity: 0.0,
                 },
             )
             .is_err());
@@ -987,6 +1439,7 @@ mod tests {
                     document_ids: vec![],
                     subdomain: None,
                     filter: Some(filter.to_string()),
+                    diversity: 0.0,
                 },
             )
             .unwrap()
@@ -1070,6 +1523,7 @@ mod tests {
                     document_ids: vec![],
                     subdomain: None,
                     filter: None,
+                    diversity: 0.0,
                 },
             )
             .unwrap();
@@ -1112,11 +1566,335 @@ mod tests {
                     document_ids: vec![],
                     subdomain: None,
                     filter: None,
+                    diversity: 0.0,
                 },
             )
             .unwrap();
         assert!(!hits.is_empty());
         assert!(hits[0].chunk.text.contains("laboral"));
+    }
+
+    #[test]
+    fn mmr_diversifies_results() {
+        let (e, _d) = engine();
+        let dom = e.create_domain("docs", None).unwrap();
+        e.ingest_document(
+            dom.id,
+            "d",
+            None,
+            BTreeMap::new(),
+            vec![],
+            IngestBody::Chunks(vec![
+                // Two highly-relevant near-duplicates plus one distinct chunk.
+                "contrato laboral indefinido".into(),
+                "contrato laboral temporal".into(),
+                "contrato de obras".into(),
+            ]),
+        )
+        .unwrap();
+
+        let run = |diversity: f32| {
+            e.search(
+                dom.id,
+                SearchRequest {
+                    query: QueryInput::Text("contrato laboral".into()),
+                    k: 2,
+                    tags: vec![],
+                    match_all: false,
+                    document_ids: vec![],
+                    subdomain: None,
+                    filter: None,
+                    diversity,
+                },
+            )
+            .unwrap()
+        };
+
+        // Pure relevance keeps the two near-duplicates (both share "laboral").
+        let plain = run(0.0);
+        assert_eq!(plain.len(), 2);
+        assert!(!plain.iter().any(|h| h.chunk.text.contains("obras")));
+
+        // High diversity promotes the distinct chunk into the top-2.
+        let diverse = run(1.0);
+        assert_eq!(diverse.len(), 2);
+        assert!(diverse.iter().any(|h| h.chunk.text.contains("obras")));
+    }
+
+    #[test]
+    fn search_returns_snippet() {
+        let (e, _d) = engine();
+        let dom = e.create_domain("docs", None).unwrap();
+        let long = format!(
+            "{}contrato laboral indefinido {}",
+            "a ".repeat(200),
+            "b ".repeat(200)
+        );
+        e.ingest_document(
+            dom.id,
+            "d",
+            None,
+            BTreeMap::new(),
+            vec![],
+            IngestBody::Chunks(vec![long]),
+        )
+        .unwrap();
+        let hits = e
+            .search(
+                dom.id,
+                SearchRequest {
+                    query: QueryInput::Text("contrato".into()),
+                    k: 1,
+                    tags: vec![],
+                    match_all: false,
+                    document_ids: vec![],
+                    subdomain: None,
+                    filter: None,
+                    diversity: 0.0,
+                },
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        let snip = hits[0].snippet.as_ref().expect("snippet present");
+        assert!(snip.contains("contrato"));
+        // It's a trimmed excerpt of the (much longer) chunk, elided with `…`.
+        assert!(snip.chars().count() < hits[0].chunk.text.chars().count());
+        assert!(snip.starts_with('…') || snip.ends_with('…'));
+    }
+
+    #[test]
+    fn multi_domain_search_merges_same_model() {
+        let (e, _d) = engine();
+        let a = e.create_domain("a", None).unwrap();
+        let b = e.create_domain("b", None).unwrap();
+        e.ingest_document(
+            a.id,
+            "da",
+            None,
+            BTreeMap::new(),
+            vec![],
+            IngestBody::Chunks(vec!["contrato laboral en A".into()]),
+        )
+        .unwrap();
+        e.ingest_document(
+            b.id,
+            "db",
+            None,
+            BTreeMap::new(),
+            vec![],
+            IngestBody::Chunks(vec!["contrato laboral en B".into()]),
+        )
+        .unwrap();
+        let hits = e
+            .search_multi(
+                &[a.id, b.id],
+                SearchRequest {
+                    query: QueryInput::Text("contrato laboral".into()),
+                    k: 10,
+                    tags: vec![],
+                    match_all: false,
+                    document_ids: vec![],
+                    subdomain: None,
+                    filter: None,
+                    diversity: 0.0,
+                },
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+        let domains: HashSet<DomainId> = hits.iter().map(|h| h.chunk.domain_id).collect();
+        assert!(domains.contains(&a.id) && domains.contains(&b.id));
+    }
+
+    #[test]
+    fn update_document_retags_and_moves_subdomain() {
+        let (e, _d) = engine();
+        let dom = e.create_domain("docs", None).unwrap();
+        let a = e.create_tag(dom.id, "a", "A", "", None).unwrap();
+        let b = e.create_tag(dom.id, "b", "B", "", None).unwrap();
+        let out = e
+            .ingest_document(
+                dom.id,
+                "d",
+                None,
+                BTreeMap::new(),
+                vec![a.id],
+                IngestBody::Chunks(vec!["contrato laboral".into()]),
+            )
+            .unwrap();
+        let sub = e.get_or_create_subdomain(dom.id, "irpf", "").unwrap();
+
+        e.update_document(out.document.id, Some(vec![b.id]), Some(sub.id), true)
+            .unwrap();
+
+        let by = |tags: Vec<TagId>, subdomain: Option<SubdomainId>| {
+            e.search(
+                dom.id,
+                SearchRequest {
+                    query: QueryInput::Text("contrato".into()),
+                    k: 5,
+                    tags,
+                    match_all: false,
+                    document_ids: vec![],
+                    subdomain,
+                    filter: None,
+                    diversity: 0.0,
+                },
+            )
+            .unwrap()
+        };
+        assert_eq!(by(vec![b.id], None).len(), 1, "retagged to b");
+        assert!(by(vec![a.id], None).is_empty(), "old tag a detached");
+        assert_eq!(by(vec![], Some(sub.id)).len(), 1, "moved into subdomain");
+        // The document row reflects the change too.
+        let doc = e.get_document(out.document.id).unwrap();
+        assert_eq!(doc.tags, vec![b.id]);
+        assert_eq!(doc.subdomain_id, Some(sub.id));
+    }
+
+    #[test]
+    fn reindex_reembeds_and_updates_model() {
+        let (e, _d) = engine();
+        let dom = e.create_domain("docs", None).unwrap();
+        e.ingest_document(
+            dom.id,
+            "d",
+            None,
+            BTreeMap::new(),
+            vec![],
+            IngestBody::Chunks(vec!["contrato laboral".into(), "pizza con piña".into()]),
+        )
+        .unwrap();
+
+        let n = e.reindex_domain(dom.id, Some("bge-small-en-v1.5")).unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(e.get_domain(dom.id).unwrap().model, "bge-small-en-v1.5");
+
+        // Search still works against the rebuilt index.
+        let hits = e
+            .search(
+                dom.id,
+                SearchRequest {
+                    query: QueryInput::Text("contrato".into()),
+                    k: 1,
+                    tags: vec![],
+                    match_all: false,
+                    document_ids: vec![],
+                    subdomain: None,
+                    filter: None,
+                    diversity: 0.0,
+                },
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].chunk.text.contains("contrato"));
+    }
+
+    #[test]
+    fn rotate_token_invalidates_old_secret() {
+        let (e, _d) = engine();
+        let (tok, plain) = e.create_token("t", vec![Scope::admin_all()], None).unwrap();
+        assert!(e.authenticate(&plain).is_ok());
+        assert!(e.token_last_used(tok.id).is_some());
+
+        let (tok2, plain2) = e.rotate_token(tok.id).unwrap();
+        assert_eq!(tok2.id, tok.id, "same id, new secret");
+        assert!(e.authenticate(&plain2).is_ok(), "new secret works");
+        assert!(
+            matches!(e.authenticate(&plain), Err(NucleusError::Unauthorized)),
+            "old secret is rejected"
+        );
+    }
+
+    #[test]
+    fn lru_cache_evicts_least_recently_used() {
+        let mut c: LruCache<&str, i32> = LruCache::new(2);
+        c.put("a", 1);
+        c.put("b", 2);
+        assert_eq!(c.get(&"a"), Some(1)); // touch "a" so "b" is now LRU
+        c.put("c", 3); // evicts "b"
+        assert_eq!(c.get(&"b"), None);
+        assert_eq!(c.get(&"a"), Some(1));
+        assert_eq!(c.get(&"c"), Some(3));
+        assert_eq!(c.len(), 2);
+    }
+
+    /// Wraps an embedder counting how many query embeddings it computes.
+    struct CountingEmbedder {
+        inner: MockEmbedder,
+        queries: std::sync::atomic::AtomicUsize,
+    }
+    impl Embedder for CountingEmbedder {
+        fn dim(&self, model: &str) -> Option<usize> {
+            self.inner.dim(model)
+        }
+        fn embed_documents(&self, model: &str, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            self.inner.embed_documents(model, texts)
+        }
+        fn embed_query(&self, model: &str, text: &str) -> Result<Vec<f32>> {
+            self.queries.fetch_add(1, Ordering::Relaxed);
+            self.inner.embed_query(model, text)
+        }
+    }
+
+    #[test]
+    fn query_cache_skips_repeated_embedding() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path().join("n.redb")).unwrap();
+        let emb = Arc::new(CountingEmbedder {
+            inner: MockEmbedder::new(64),
+            queries: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let e = Engine::new(storage, emb.clone()).unwrap();
+        e.set_query_cache(16);
+        let dom = e.create_domain("docs", None).unwrap();
+        e.ingest_document(
+            dom.id,
+            "d",
+            None,
+            BTreeMap::new(),
+            vec![],
+            IngestBody::Chunks(vec!["contrato laboral".into()]),
+        )
+        .unwrap();
+
+        let run = || {
+            e.search(
+                dom.id,
+                SearchRequest {
+                    query: QueryInput::Text("contrato".into()),
+                    k: 1,
+                    tags: vec![],
+                    match_all: false,
+                    document_ids: vec![],
+                    subdomain: None,
+                    filter: None,
+                    diversity: 0.0,
+                },
+            )
+            .unwrap()
+        };
+        // Three identical text queries → the embedding is computed once.
+        run();
+        run();
+        run();
+        assert_eq!(emb.queries.load(Ordering::Relaxed), 1);
+
+        // A different query is a miss (computed once more).
+        e.search(
+            dom.id,
+            SearchRequest {
+                query: QueryInput::Text("laboral".into()),
+                k: 1,
+                tags: vec![],
+                match_all: false,
+                document_ids: vec![],
+                subdomain: None,
+                filter: None,
+                diversity: 0.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(emb.queries.load(Ordering::Relaxed), 2);
     }
 
     #[test]
@@ -1162,6 +1940,45 @@ mod tests {
     }
 
     #[test]
+    fn search_with_scalar_quantized_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path().join("n.redb")).unwrap();
+        let e = Engine::with_index_kind(
+            storage,
+            Arc::new(MockEmbedder::new(64)),
+            crate::index::IndexKind::Sq,
+        )
+        .unwrap();
+        let dom = e.create_domain("docs", None).unwrap();
+        e.ingest_document(
+            dom.id,
+            "d",
+            None,
+            BTreeMap::new(),
+            vec![],
+            IngestBody::Chunks(vec!["el contrato laboral".into(), "pizza con piña".into()]),
+        )
+        .unwrap();
+        let hits = e
+            .search(
+                dom.id,
+                SearchRequest {
+                    query: QueryInput::Text("contrato".into()),
+                    k: 1,
+                    tags: vec![],
+                    match_all: false,
+                    document_ids: vec![],
+                    subdomain: None,
+                    filter: None,
+                    diversity: 0.0,
+                },
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].chunk.text.contains("contrato"));
+    }
+
+    #[test]
     fn search_with_hnsw_backend() {
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::open(dir.path().join("n.redb")).unwrap();
@@ -1193,6 +2010,7 @@ mod tests {
                     document_ids: vec![],
                     subdomain: None,
                     filter: None,
+                    diversity: 0.0,
                 },
             )
             .unwrap();
@@ -1249,6 +2067,7 @@ mod tests {
                     document_ids: vec![],
                     subdomain: None,
                     filter: None,
+                    diversity: 0.0,
                 },
             )
             .unwrap();
@@ -1289,6 +2108,7 @@ mod tests {
                     document_ids: vec![],
                     subdomain: None,
                     filter: None,
+                    diversity: 0.0,
                 },
             )
             .unwrap();
