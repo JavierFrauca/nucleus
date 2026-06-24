@@ -37,6 +37,14 @@ public sealed class NucleusService : IDisposable
             text,
             labels: string.IsNullOrWhiteSpace(label) ? null : [label.Trim()]);
 
+    /// <summary>Ingest a raw file; the engine extracts text by format. Blocking.</summary>
+    public IngestResult IngestFile(string filename, byte[] bytes, string? label) =>
+        _engine.IngestFile(
+            DomainId,
+            filename,
+            bytes,
+            labels: string.IsNullOrWhiteSpace(label) ? null : [label.Trim()]);
+
     /// <summary>Hybrid search. Blocking — call off the UI thread.</summary>
     public IReadOnlyList<SearchHit> Search(string query, int k = 5) =>
         _engine.Search(DomainId, query, k: k);

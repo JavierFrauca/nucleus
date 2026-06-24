@@ -9,7 +9,7 @@ Proyectos mínimos para aprender. Hay **dos sabores** según el modo de Nucleus:
 
 | Ejemplo | Lenguaje | Modo | Qué muestra |
 |---|---|---|---|
-| [`csharp/NucleusBlazor`](csharp/NucleusBlazor) | C# / Blazor | **Embebido** | Web app Blazor Server con UI de **ingesta + búsqueda**; el motor vive en el propio proceso .NET (P/Invoke a `nucleus.dll`). |
+| [`csharp/NucleusBlazor`](csharp/NucleusBlazor) | C# / Blazor | **Embebido** | Web app Blazor Server con UI de **ingesta (texto o fichero pdf/docx/…) + búsqueda**; el motor vive en el propio proceso .NET (P/Invoke a `nucleus.dll`). |
 | [`ffi-smoke`](ffi-smoke) | C# / consola | **Embebido** | Smoke test end-to-end del binding nativo `Nucleus.Native` (open → ingestar → buscar → editar → reindex). |
 | [`csharp/NucleusDemo`](csharp/NucleusDemo) | C# / .NET | HTTP | Consola con **menú** (crear dominio, ingestar texto, buscar, listar, backup, **subir fichero crudo**). |
 | [`javascript/node`](javascript/node) | Node (JS) | HTTP | `demo.mjs`: flujo **headless** (crear → ingestar → esperar job → buscar). `upload.mjs`: **subida de fichero crudo** (PDF…). |

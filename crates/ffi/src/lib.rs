@@ -38,6 +38,7 @@ use serde_json::json;
 
 use nucleus_core::embed::{Embedder, LocalEmbedder};
 use nucleus_core::engine::{IngestBody, QueryInput, SearchRequest};
+use nucleus_core::extract::extract_text;
 use nucleus_core::id::{ChunkId, DocumentId, DomainId, SubdomainId, TagId};
 use nucleus_core::index::IndexKind;
 use nucleus_core::storage::Storage;
@@ -370,6 +371,96 @@ pub unsafe extern "C" fn nucleus_ingest_text(
         Ok(chunk_count) => {
             ok_json(out_json, json!({ "document_id": doc.id, "chunk_count": chunk_count }))
         }
+        Err(e) => fail(out_json, NUCLEUS_ERR_ENGINE, e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+struct IngestFileInput {
+    domain_id: u64,
+    /// Used to detect the format (extension) AND as the default title.
+    filename: String,
+    /// Defaults to `filename` when omitted.
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    metadata: BTreeMap<String, String>,
+    #[serde(default)]
+    labels: Vec<String>,
+    #[serde(default)]
+    subdomain: Option<String>,
+}
+
+/// Ingest a **raw file** (pdf, docx, xlsx, html, md, txt…): the engine extracts
+/// the text by format, then chunks/embeds/indexes it. Metadata travels as JSON in
+/// `input_json`; the file bytes are passed separately via `bytes`/`bytes_len`.
+/// Output: `{"document_id":N,"chunk_count":M,"chars":C}`.
+///
+/// # Safety
+/// `bytes` must point to `bytes_len` readable bytes (or be null with len 0). The
+/// usual string-pointer rules apply to `input_json`; see module docs.
+#[no_mangle]
+pub unsafe extern "C" fn nucleus_ingest_file(
+    handle: *mut Engine,
+    input_json: *const c_char,
+    bytes: *const u8,
+    bytes_len: usize,
+    out_json: *mut *mut c_char,
+) -> i32 {
+    let Some(eng) = engine(handle) else {
+        return fail(out_json, NUCLEUS_ERR_NULL_ARG, "engine handle is null".into());
+    };
+    if bytes.is_null() || bytes_len == 0 {
+        return fail(out_json, NUCLEUS_ERR_NULL_ARG, "file bytes are empty".into());
+    }
+    let input: IngestFileInput = match parse(input_json) {
+        Ok(v) => v,
+        Err(cm) => return fail(out_json, cm.0, cm.1),
+    };
+    let data = std::slice::from_raw_parts(bytes, bytes_len);
+
+    // Extract text by format (the engine owns the parsers — pdf/docx/xlsx/html…).
+    let text = match extract_text(&input.filename, data) {
+        Ok(t) => t,
+        Err(e) => return fail(out_json, NUCLEUS_ERR_ENGINE, e.to_string()),
+    };
+    let chars = text.chars().count();
+    let domain_id = DomainId::from(input.domain_id);
+
+    let subdomain_id = match &input.subdomain {
+        Some(name) => match eng.get_or_create_subdomain(domain_id, name, "") {
+            Ok(s) => Some(s.id),
+            Err(e) => return fail(out_json, NUCLEUS_ERR_ENGINE, e.to_string()),
+        },
+        None => None,
+    };
+    let mut tags = Vec::with_capacity(input.labels.len());
+    for label in &input.labels {
+        match eng.get_or_create_label(domain_id, label) {
+            Ok(t) => tags.push(t.id),
+            Err(e) => return fail(out_json, NUCLEUS_ERR_ENGINE, e.to_string()),
+        }
+    }
+
+    let title = input.title.unwrap_or_else(|| input.filename.clone());
+    let doc = match eng.create_document_record(
+        domain_id,
+        subdomain_id,
+        &title,
+        input.source,
+        input.metadata,
+        tags,
+    ) {
+        Ok(d) => d,
+        Err(e) => return fail(out_json, NUCLEUS_ERR_ENGINE, e.to_string()),
+    };
+    match eng.populate_document(&doc, IngestBody::Text(text)) {
+        Ok(chunk_count) => ok_json(
+            out_json,
+            json!({ "document_id": doc.id, "chunk_count": chunk_count, "chars": chars }),
+        ),
         Err(e) => fail(out_json, NUCLEUS_ERR_ENGINE, e.to_string()),
     }
 }

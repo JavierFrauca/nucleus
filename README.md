@@ -119,7 +119,8 @@ se descarga la primera vez es el modelo de embeddings (~450 MB).
 - **C ABI**: handle opaco + borde **JSON** (entrada/salida son strings JSON; código
   de retorno `0` OK / `<0` error con `{"error":...}` y `nucleus_last_error()`).
   Header C en [`crates/ffi/include/nucleus.h`](crates/ffi/include/nucleus.h).
-  Funciones: `open`/`close`, `create_domain`, `ingest_text`, `search` (con MMR
+  Funciones: `open`/`close`, `create_domain`, `ingest_text`, `ingest_file` (extracción
+  multi-formato: pdf/docx/xlsx/html/md/txt), `search` (con MMR
   `diversity` y `snippet`), `search_multi`, `list_domains`/`list_tags`/`list_subdomains`/`list_documents`,
   `get_document`, `chunk_context`, edición/cascada (`rename_domain`, `delete_domain`,
   `delete_subdomain`, `update_tag`, `delete_tag`, `update_document`, `delete_document`),

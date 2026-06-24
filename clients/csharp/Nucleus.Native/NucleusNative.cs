@@ -82,6 +82,24 @@ public sealed class NucleusEngine : IDisposable
             subdomain,
         });
 
+    /// <summary>
+    /// Ingest a raw file (pdf, docx, xlsx, html, md, txt…). The engine extracts the
+    /// text by format, then chunks/embeds/indexes it. Blocking — call off the UI thread.
+    /// </summary>
+    public IngestResult IngestFile(
+        ulong domainId,
+        string filename,
+        byte[] bytes,
+        string? title = null,
+        IEnumerable<string>? labels = null,
+        string? subdomain = null)
+    {
+        string json = JsonSerializer.Serialize(
+            new { domain_id = domainId, filename, title, labels, subdomain }, JsonIn);
+        int code = nucleus_ingest_file(_handle, json, bytes, (UIntPtr)bytes.Length, out IntPtr outJson);
+        return Finish<IngestResult>(code, outJson);
+    }
+
     /// <summary>Search a domain by text.</summary>
     /// <param name="diversity">MMR diversity in [0,1]; 0 = pure relevance.</param>
     public IReadOnlyList<SearchHit> Search(
@@ -268,6 +286,9 @@ public sealed class NucleusEngine : IDisposable
 
     [DllImport(Dll, CharSet = CharSet.Ansi)]
     private static extern int nucleus_ingest_text(IntPtr handle, string inputJson, out IntPtr outJson);
+
+    [DllImport(Dll, CharSet = CharSet.Ansi)]
+    private static extern int nucleus_ingest_file(IntPtr handle, string inputJson, byte[] bytes, UIntPtr bytesLen, out IntPtr outJson);
 
     [DllImport(Dll, CharSet = CharSet.Ansi)]
     private static extern int nucleus_search(IntPtr handle, string inputJson, out IntPtr outJson);

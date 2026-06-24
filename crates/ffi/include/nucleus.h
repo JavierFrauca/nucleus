@@ -15,6 +15,8 @@
 #ifndef NUCLEUS_H
 #define NUCLEUS_H
 
+#include <stddef.h> /* size_t */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -50,6 +52,13 @@ int nucleus_create_domain(NucleusEngine *handle, const char *input_json, char **
 /* {"domain_id":N,"title":"...","text":"...","source":null,"metadata":{},
  *  "labels":[],"subdomain":null} -> {"document_id":N,"chunk_count":M} */
 int nucleus_ingest_text(NucleusEngine *handle, const char *input_json, char **out_json);
+
+/* Ingest a raw file; the engine extracts text by format (pdf/docx/xlsx/html/md/txt).
+ * Metadata in input_json: {"domain_id":N,"filename":"x.pdf","title":null,"labels":[],
+ * "subdomain":null}; the bytes are passed separately.
+ * -> {"document_id":N,"chunk_count":M,"chars":C} */
+int nucleus_ingest_file(NucleusEngine *handle, const char *input_json,
+                        const unsigned char *bytes, size_t bytes_len, char **out_json);
 
 /* {"document_id":N} -> {"deleted":true} */
 int nucleus_delete_document(NucleusEngine *handle, const char *input_json, char **out_json);

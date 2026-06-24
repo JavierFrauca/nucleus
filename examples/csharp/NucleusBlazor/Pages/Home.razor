@@ -15,7 +15,11 @@
     <input @bind="title" placeholder="Título (opcional)" />
     <input @bind="label" placeholder="Etiqueta (opcional)" />
     <textarea @bind="text" rows="4" placeholder="Texto a indexar…"></textarea>
-    <button @onclick="Ingest" disabled="@busy">Ingestar</button>
+    <button @onclick="Ingest" disabled="@busy">Ingestar texto</button>
+
+    <p class="muted" style="margin-top:1rem;">…o sube un fichero (pdf, docx, xlsx, html, md, txt) — el motor extrae el texto:</p>
+    <InputFile OnChange="IngestFile" disabled="@busy" />
+
     @if (ingestMsg is not null)
     {
         <p class="muted">@ingestMsg</p>
@@ -71,6 +75,32 @@
         catch (Exception ex)
         {
             ingestMsg = "Error: " + ex.Message;
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task IngestFile(InputFileChangeEventArgs e)
+    {
+        var file = e.File;
+        busy = true;
+        ingestMsg = null;
+        try
+        {
+            using var ms = new MemoryStream();
+            // Allow up to 25 MB (default cap is 500 KB).
+            await file.OpenReadStream(25 * 1024 * 1024).CopyToAsync(ms);
+            var bytes = ms.ToArray();
+            var label0 = label;
+            var r = await Task.Run(() => Nucleus.IngestFile(file.Name, bytes, label0));
+            ingestMsg = $"Fichero '{file.Name}' indexado: documento {r.DocumentId}, {r.ChunkCount} chunk(s), {r.Chars} caracteres.";
+            docCount = Nucleus.DocumentCount();
+        }
+        catch (Exception ex)
+        {
+            ingestMsg = "Error con el fichero: " + ex.Message;
         }
         finally
         {

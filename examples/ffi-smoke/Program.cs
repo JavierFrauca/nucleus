@@ -82,4 +82,9 @@ Console.WriteLine($"[search diversity=0.7] {diverse.Count} hit(s); snippet: {div
 
 Console.WriteLine($"[reindex_domain] re-embedded {engine.ReindexDomain(domain.Id)} chunk(s)");
 
+// --- file ingest (multi-format extraction inside the engine) ---------------
+var md = System.Text.Encoding.UTF8.GetBytes("# Política de privacidad\n\nLos datos personales se tratan conforme al RGPD.");
+IngestResult fr = engine.IngestFile(domain.Id, "privacidad.md", md, labels: ["legal"]);
+Console.WriteLine($"[ingest_file] privacidad.md → doc {fr.DocumentId}, {fr.ChunkCount} chunk(s), {fr.Chars} chars");
+
 Console.WriteLine("\nSMOKE TEST OK");
