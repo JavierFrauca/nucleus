@@ -1,5 +1,8 @@
 # Nucleus
 
+[![Release](https://img.shields.io/github/v/release/JavierFrauca/nucleus?sort=semver)](https://github.com/JavierFrauca/nucleus/releases/latest)
+[![Descargar DLL](https://img.shields.io/badge/descargar-nucleus.dll%20(win--x64)-blue)](https://github.com/JavierFrauca/nucleus/releases/latest)
+
 **Base de datos ad-hoc para RAG, embebible en tu aplicación.** Escrita en Rust.
 Nucleus es un motor todo-en-uno: almacena, indexa y **genera los embeddings en
 proceso**.
@@ -29,6 +32,19 @@ está organizado en torno a dos ejes de primera clase:
 En ambos modos se **recuperan chunks** mediante búsqueda **híbrida** (vectorial +
 léxico BM25 fusionados con RRF), con **reranking** opcional, filtro de etiquetas y un
 lenguaje de consulta para filtros ricos.
+
+## Descargar
+
+El bundle del **modo embebido** (Windows x64) está disponible en
+[**Releases**](https://github.com/JavierFrauca/nucleus/releases/latest):
+
+- **[nucleus-dll-0.1.0-windows-x64.zip](https://github.com/JavierFrauca/nucleus/releases/download/v0.1.0/nucleus-dll-0.1.0-windows-x64.zip)** (~9 MB) — `nucleus.dll` autocontenida + import lib + header C [`nucleus.h`](crates/ffi/include/nucleus.h) + binding C# tipado + README.
+
+Suelta `nucleus.dll` junto a tu ejecutable y referencia el binding C# (o usa el C ABI
+desde C/C++). En Windows la DLL es autocontenida (ONNX Runtime enlazado estático); la
+primera ingesta descarga el modelo de embeddings (~450 MB). Para compilar desde fuente
+o regenerar el bundle, ver [requisitos de build](#requisitos-de-build) y
+`packaging/build-dll.ps1`.
 
 ## Documentación
 
