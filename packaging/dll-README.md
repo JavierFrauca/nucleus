@@ -30,18 +30,18 @@ See `nucleus.h` for the full list.
 using Nucleus.Native;
 
 using var engine = NucleusEngine.Open("data/nucleus.redb", modelCache: "models");
-var domain = engine.CreateDomain("legal");
-ulong id = domain.RootElement.GetProperty("id").GetUInt64();
+Domain domain = engine.CreateDomain("legal");
 
-engine.IngestText(id, "Contrato", "texto largo…", labels: ["contratos"]);
+engine.IngestText(domain.Id, "Contrato", "texto largo…", labels: ["contratos"]);
 
-var hits = engine.Search(id, "cláusula de rescisión", k: 5, labels: ["contratos"]);
-foreach (var hit in hits.RootElement.GetProperty("hits").EnumerateArray())
-    Console.WriteLine(hit.GetProperty("chunk").GetProperty("text").GetString());
+// Strongly typed: Search returns IReadOnlyList<SearchHit>, not raw JSON.
+foreach (SearchHit hit in engine.Search(domain.Id, "cláusula de rescisión", k: 5, labels: ["contratos"]))
+    Console.WriteLine($"{hit.Score:F3}  {hit.Chunk.Text}");
 ```
 
-The C# binding omits null fields when serializing — required, because the engine's
-optional fields must be **absent** rather than explicitly `null`.
+The binding maps the engine's snake_case JSON onto PascalCase records (`Domain`,
+`Document`, `Chunk`, `SearchHit`…) and omits null fields when serializing inputs
+(the engine's optional fields must be **absent** rather than explicitly `null`).
 
 ## Quick start (C/C++)
 

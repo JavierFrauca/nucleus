@@ -122,14 +122,13 @@ using Nucleus.Native;
 
 // Sin db_path -> base por usuario en %LOCALAPPDATA%\Nucleus\nucleus.redb
 using var engine = NucleusEngine.Open("data/nucleus.redb", modelCache: "models");
-var domain = engine.CreateDomain("legal");
-ulong id = domain.RootElement.GetProperty("id").GetUInt64();
+Domain domain = engine.CreateDomain("legal");
 
-engine.IngestText(id, "Contrato", "El arrendador podrá rescindir…", labels: ["contratos"]);
+engine.IngestText(domain.Id, "Contrato", "El arrendador podrá rescindir…", labels: ["contratos"]);
 
-var hits = engine.Search(id, "cómo terminar un contrato antes de tiempo", k: 5, labels: ["contratos"]);
-foreach (var hit in hits.RootElement.GetProperty("hits").EnumerateArray())
-    Console.WriteLine(hit.GetProperty("chunk").GetProperty("text").GetString());
+// Devuelve objetos tipados (Domain, SearchHit, Chunk…), no JSON crudo.
+foreach (SearchHit hit in engine.Search(domain.Id, "cómo terminar un contrato antes de tiempo", k: 5, labels: ["contratos"]))
+    Console.WriteLine($"{hit.Score:F3}  {hit.Chunk.Text}");
 ```
 
 **Ubicación por defecto**: si no se indica `db_path`, la BD se crea por usuario en

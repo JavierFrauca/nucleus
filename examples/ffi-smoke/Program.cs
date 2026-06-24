@@ -1,4 +1,3 @@
-using System.Text.Json;
 using Nucleus.Native;
 
 // --- default path probe: open with NO db_path -> per-user %LOCALAPPDATA%\Nucleus.
@@ -10,8 +9,9 @@ using Nucleus.Native;
     Console.WriteLine($"[default-path] opened with no db_path; expected at {expected}: exists={File.Exists(expected)}");
 }
 
-// End-to-end smoke test for nucleus.dll exercising the full embedded surface:
-// open (HNSW) → create domain → ingest → search → browse → context → delete → persist.
+// End-to-end smoke test for nucleus.dll exercising the full embedded surface via
+// the strongly-typed binding: open (HNSW) → create → ingest → search → browse →
+// context → delete → persist → edit/reindex/multi-domain.
 var dbDir = Path.Combine(Path.GetTempPath(), "nucleus-ffi-smoke");
 Directory.CreateDirectory(dbDir);
 var dbPath = Path.Combine(dbDir, "smoke.redb");
@@ -23,9 +23,8 @@ if (Directory.Exists(indexDir)) Directory.Delete(indexDir, true);
 Console.WriteLine($"Opening DB at {dbPath} (index=hnsw, dir={indexDir})");
 using var engine = NucleusEngine.Open(dbPath, modelCache: modelCache, indexDir: indexDir, indexKind: "hnsw");
 
-var domain = engine.CreateDomain("legal");
-ulong domainId = domain.RootElement.GetProperty("id").GetUInt64();
-Console.WriteLine($"Domain created: id={domainId}, dim={domain.RootElement.GetProperty("dim").GetInt32()}");
+Domain domain = engine.CreateDomain("legal");
+Console.WriteLine($"Domain created: id={domain.Id}, dim={domain.Dim}");
 
 Console.WriteLine("Ingesting (first run downloads the embedding model, ~450MB)...");
 var docs = new (string Title, string Text, string Label)[]
@@ -37,19 +36,16 @@ var docs = new (string Title, string Text, string Label)[]
 var docIds = new List<ulong>();
 foreach (var d in docs)
 {
-    var r = engine.IngestText(domainId, d.Title, d.Text, labels: [d.Label]);
-    docIds.Add(r.RootElement.GetProperty("document_id").GetUInt64());
-    Console.WriteLine($"  ingested '{d.Title}': doc={docIds[^1]}, {r.RootElement.GetProperty("chunk_count").GetInt32()} chunk(s)");
+    IngestResult r = engine.IngestText(domain.Id, d.Title, d.Text, labels: [d.Label]);
+    docIds.Add(r.DocumentId);
+    Console.WriteLine($"  ingested '{d.Title}': doc={r.DocumentId}, {r.ChunkCount} chunk(s)");
 }
 
-void RunSearch(string label, string query, string[]? labels = null)
+void RunSearch(string label, string query, string[]? labels = null, float diversity = 0f)
 {
     Console.WriteLine($"\n[{label}] query: \"{query}\"" + (labels is null ? "" : $"  labels={string.Join(",", labels)}"));
-    var res = engine.Search(domainId, query, k: 3, labels: labels);
-    int i = 0;
-    foreach (var hit in res.RootElement.GetProperty("hits").EnumerateArray())
-        Console.WriteLine($"  #{++i} score={hit.GetProperty("score").GetSingle():F4}  {hit.GetProperty("chunk").GetProperty("text").GetString()}");
-    if (i == 0) Console.WriteLine("  (no hits)");
+    foreach (var (hit, i) in engine.Search(domain.Id, query, k: 3, labels: labels, diversity: diversity).Select((h, i) => (h, i + 1)))
+        Console.WriteLine($"  #{i} score={hit.Score:F4}  {hit.Chunk.Text}");
 }
 
 // --- HNSW retrieval --------------------------------------------------------
@@ -57,44 +53,33 @@ RunSearch("hnsw-semantic", "cómo terminar un contrato antes de tiempo");
 RunSearch("hnsw-filtered", "cómo terminar un contrato antes de tiempo", labels: ["contratos"]);
 
 // --- browse ----------------------------------------------------------------
-Console.WriteLine($"\n[list_domains] {engine.ListDomains().RootElement.GetProperty("domains").GetArrayLength()} domain(s)");
-Console.WriteLine($"[list_documents] {engine.ListDocuments(domainId).RootElement.GetProperty("documents").GetArrayLength()} doc(s)");
-var tags = engine.ListTags(domainId).RootElement.GetProperty("tags");
-Console.WriteLine($"[list_tags] {string.Join(", ", tags.EnumerateArray().Select(t => t.GetProperty("name").GetString()))}");
+Console.WriteLine($"\n[list_domains] {engine.ListDomains().Count} domain(s)");
+Console.WriteLine($"[list_documents] {engine.ListDocuments(domain.Id).Count} doc(s)");
+Console.WriteLine($"[list_tags] {string.Join(", ", engine.ListTags(domain.Id).Select(t => t.Name))}");
 
 // --- chunk context (find a chunk via search, then expand neighbours) --------
-var first = engine.Search(domainId, "rescisión del contrato", k: 1).RootElement.GetProperty("hits")[0];
-ulong chunkId = first.GetProperty("chunk").GetProperty("id").GetUInt64();
-var ctx = engine.ChunkContext(chunkId, before: 1, after: 1).RootElement.GetProperty("chunks");
-Console.WriteLine($"\n[chunk_context] chunk {chunkId} → {ctx.GetArrayLength()} chunk(s) in window");
+ulong chunkId = engine.Search(domain.Id, "rescisión del contrato", k: 1)[0].Chunk.Id;
+Console.WriteLine($"\n[chunk_context] chunk {chunkId} → {engine.ChunkContext(chunkId, before: 1, after: 1).Count} chunk(s) in window");
 
 // --- delete + verify -------------------------------------------------------
 engine.DeleteDocument(docIds[1]); // remove the "Laboral" doc
-int remaining = engine.ListDocuments(domainId).RootElement.GetProperty("documents").GetArrayLength();
-Console.WriteLine($"[delete_document] removed doc {docIds[1]}; remaining = {remaining}");
+Console.WriteLine($"[delete_document] removed doc {docIds[1]}; remaining = {engine.ListDocuments(domain.Id).Count}");
 
 // --- persist HNSW dumps ----------------------------------------------------
-var persisted = engine.PersistIndexes().RootElement.GetProperty("persisted").GetInt32();
-Console.WriteLine($"[persist_indexes] persisted {persisted} index(es)");
+Console.WriteLine($"[persist_indexes] persisted {engine.PersistIndexes()} index(es)");
 Console.WriteLine($"[index files] {(Directory.Exists(indexDir) ? string.Join(", ", Directory.GetFiles(indexDir).Select(Path.GetFileName)) : "(none)")}");
 
 // --- new capabilities from the core upgrade --------------------------------
-var renamed = engine.RenameDomain(domainId, "legal-es");
-Console.WriteLine($"\n[rename_domain] -> {renamed.RootElement.GetProperty("name").GetString()}");
+Console.WriteLine($"\n[rename_domain] -> {engine.RenameDomain(domain.Id, "legal-es").Name}");
 
-engine.UpdateDocument(docIds[0], labels: ["contratos", "arrendamiento"]);
-var d0 = engine.GetDocument(docIds[0]);
-Console.WriteLine($"[update_document] doc {docIds[0]} now has {d0.RootElement.GetProperty("tags").GetArrayLength()} tag(s)");
+Document updated = engine.UpdateDocument(docIds[0], labels: ["contratos", "arrendamiento"]);
+Console.WriteLine($"[update_document] doc {updated.Id} now has {updated.Tags.Count} tag(s)");
 
-var multi = engine.SearchMulti([domainId], "rescisión", k: 2);
-Console.WriteLine($"[search_multi] {multi.RootElement.GetProperty("hits").GetArrayLength()} hit(s) across 1 domain");
+Console.WriteLine($"[search_multi] {engine.SearchMulti([domain.Id], "rescisión", k: 2).Count} hit(s) across 1 domain");
 
-var diverse = engine.Search(domainId, "contrato", k: 2, diversity: 0.7f);
-var firstHit = diverse.RootElement.GetProperty("hits")[0];
-var snip = firstHit.TryGetProperty("snippet", out var s) ? s.GetString() : "(none)";
-Console.WriteLine($"[search diversity=0.7] {diverse.RootElement.GetProperty("hits").GetArrayLength()} hit(s); snippet: {snip}");
+var diverse = engine.Search(domain.Id, "contrato", k: 2, diversity: 0.7f);
+Console.WriteLine($"[search diversity=0.7] {diverse.Count} hit(s); snippet: {diverse[0].Snippet ?? "(none)"}");
 
-var reidx = engine.ReindexDomain(domainId).RootElement.GetProperty("reindexed").GetInt32();
-Console.WriteLine($"[reindex_domain] re-embedded {reidx} chunk(s)");
+Console.WriteLine($"[reindex_domain] re-embedded {engine.ReindexDomain(domain.Id)} chunk(s)");
 
 Console.WriteLine("\nSMOKE TEST OK");
