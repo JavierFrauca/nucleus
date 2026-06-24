@@ -19,6 +19,24 @@ use std::sync::RwLock;
 use std::time::Duration;
 use tokio::sync::Semaphore;
 
+/// Default machine-wide data directory when `NUCLEUS_DB` is unset. We follow the
+/// platform convention for service/daemon data rather than the launch directory:
+/// `%ProgramData%\Nucleus` on Windows, `/var/lib/nucleus` elsewhere. Derived from
+/// the environment (never a hardcoded drive), with a sane fallback.
+pub fn default_data_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        env::var_os("ProgramData")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
+            .join("Nucleus")
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from("/var/lib/nucleus")
+    }
+}
+
 use serde::{Deserialize, Serialize};
 
 use nucleus_core::auth::AuthContext;
@@ -147,8 +165,8 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> Self {
         let db_path: PathBuf = env::var("NUCLEUS_DB")
-            .unwrap_or_else(|_| "nucleus.redb".to_string())
-            .into();
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| default_data_dir().join("nucleus.redb"));
         let index_dir = env::var("NUCLEUS_INDEX_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| {

@@ -1,8 +1,24 @@
 # Nucleus
 
-Motor de base de datos **orientado a RAG** escrito en Rust. Nucleus es un motor
-todo-en-uno: almacena, indexa y **genera los embeddings en proceso**. Está
-organizado en torno a dos ejes de primera clase:
+**Base de datos ad-hoc para RAG, embebible en tu aplicación.** Escrita en Rust.
+Nucleus es un motor todo-en-uno: almacena, indexa y **genera los embeddings en
+proceso**.
+
+> **Cambio de rumbo (2026-06):** el foco de Nucleus es ahora el **modo embebido** —
+> una base de datos vectorial *ad-hoc* que tu app referencia como **DLL nativa**
+> (`nucleus.dll` / `.so` / `.dylib`), sin red, sin sidecar, sin servicio que
+> desplegar: «SQLite, pero para RAG con embeddings dentro». El servidor HTTP sigue
+> existiendo como **segundo modo** para despliegues cliente-servidor.
+
+## Dos modos, un mismo motor
+
+| Modo | Cuándo | Cómo |
+|------|--------|------|
+| **Embebido (DLL)** — *foco* | RAG pequeño/rápido integrado en una app de escritorio o de servidor | Referencias `nucleus.dll` por C ABI (binding C# incluido). [Ver abajo](#modo-embebido-dll). |
+| **Servidor (HTTP)** | Despliegue cliente-servidor, varios consumidores | Binario `nucleus-server` (axum). [Ver abajo](#ejecutar-el-servidor). |
+
+Ambos comparten el crate del motor [`nucleus-core`](crates/core/README.md), que
+está organizado en torno a dos ejes de primera clase:
 
 - **Dominios** — colecciones/namespaces que segmentan la base. Cada dominio fija un
   modelo de embeddings (y por tanto una dimensión) y tiene su propio índice vectorial
@@ -10,9 +26,9 @@ organizado en torno a dos ejes de primera clase:
 - **Etiquetado** — taxonomía jerárquica por dominio, asociada a los chunks y usada
   para filtrar en la búsqueda.
 
-La API **recupera chunks** mediante búsqueda **híbrida** (vectorial + léxico BM25
-fusionados con RRF), con **reranking** opcional, filtro de etiquetas y un lenguaje de
-consulta para filtros ricos.
+En ambos modos se **recuperan chunks** mediante búsqueda **híbrida** (vectorial +
+léxico BM25 fusionados con RRF), con **reranking** opcional, filtro de etiquetas y un
+lenguaje de consulta para filtros ricos.
 
 ## Documentación
 
@@ -34,11 +50,16 @@ Guías detalladas en [`docs/`](docs/):
 
 ## Clientes / SDKs
 
-Para consumir la API desde otros proyectos:
+**Embebido (DLL, foco)** — sin red, en proceso:
 
-- **C# / .NET** — [`clients/csharp`](clients/csharp) (`netstandard2.0` + `net8.0`, NuGet-ready).
+- **C# / .NET** — [`clients/csharp/Nucleus.Native`](clients/csharp/Nucleus.Native) (P/Invoke sobre `nucleus.dll`).
+- **Rust** — el crate [`nucleus-core`](crates/core/README.md) directamente (sin FFI).
+- **C / C++ / otros** — el C ABI de [`nucleus.dll`](crates/ffi) vía [`nucleus.h`](crates/ffi/include/nucleus.h).
+
+**Cliente-servidor (HTTP)** — contra `nucleus-server`:
+
+- **C# / .NET** — [`clients/csharp/Nucleus.Client`](clients/csharp) (`netstandard2.0` + `net8.0`, NuGet-ready).
 - **JavaScript / TypeScript** — [`clients/typescript`](clients/typescript) (ESM, Node y navegador).
-- **Rust** (motor embebido) — el crate [`nucleus-core`](crates/core/README.md).
 - Otros lenguajes: genera un cliente desde [`docs/openapi.yaml`](docs/openapi.yaml).
 
 **Ejemplos ejecutables** en [`examples/`](examples/README.md): demo de consola C# (menú),
@@ -65,11 +86,56 @@ demo headless de Node, y un mini-front de navegador con 2 pantallas (ingesta y b
   **restore en caliente** (swap del motor). Ver [operación](docs/operacion.md#backups-y-restauración).
 - **API HTTP** con axum.
 
+## Modo embebido (DLL)
+
+El modo **prioritario**: Nucleus dentro de tu proceso, sin HTTP. Tu app enlaza
+`nucleus.dll` (en Windows; `libnucleus.so`/`.dylib` en otros) y llama al motor
+directamente. En Windows la DLL es **autocontenida** (~28 MB): `ort`/ONNX Runtime se
+enlaza **estáticamente**, así que no hay que repartir `onnxruntime.dll`. Lo único que
+se descarga la primera vez es el modelo de embeddings (~450 MB).
+
+- **Crate**: [`crates/ffi`](crates/ffi) (`nucleus-ffi`, `crate-type = ["cdylib"]`).
+- **C ABI**: handle opaco + borde **JSON** (entrada/salida son strings JSON; código
+  de retorno `0` OK / `<0` error con `{"error":...}` y `nucleus_last_error()`).
+  Header C en [`crates/ffi/include/nucleus.h`](crates/ffi/include/nucleus.h).
+  Funciones: `open`/`close`, `create_domain`, `ingest_text`, `search`,
+  `list_domains`/`list_tags`/`list_subdomains`/`list_documents`, `get_document`,
+  `delete_document`, `chunk_context`, `persist_indexes`, `string_free`, `last_error`.
+- **Binding C#** listo para usar: [`clients/csharp/Nucleus.Native`](clients/csharp/Nucleus.Native)
+  (`NucleusEngine : IDisposable`, P/Invoke).
+- **Camino síncrono**: la ingesta (chunk → embed → persist → index) y la búsqueda
+  corren en el hilo del llamante (sin tokio ni cola de jobs). La app controla su
+  propio threading; el handle es `Send + Sync`.
+
+```csharp
+using Nucleus.Native;
+
+// Sin db_path -> base por usuario en %LOCALAPPDATA%\Nucleus\nucleus.redb
+using var engine = NucleusEngine.Open("data/nucleus.redb", modelCache: "models");
+var domain = engine.CreateDomain("legal");
+ulong id = domain.RootElement.GetProperty("id").GetUInt64();
+
+engine.IngestText(id, "Contrato", "El arrendador podrá rescindir…", labels: ["contratos"]);
+
+var hits = engine.Search(id, "cómo terminar un contrato antes de tiempo", k: 5, labels: ["contratos"]);
+foreach (var hit in hits.RootElement.GetProperty("hits").EnumerateArray())
+    Console.WriteLine(hit.GetProperty("chunk").GetProperty("text").GetString());
+```
+
+**Ubicación por defecto**: si no se indica `db_path`, la BD se crea por usuario en
+`%LOCALAPPDATA%\Nucleus\nucleus.redb` (Windows) o `$XDG_DATA_HOME`/`~/.local/share`
+`/nucleus/nucleus.redb` (otros). El directorio se crea solo.
+
+**Empaquetado**: `packaging/build-dll.ps1 -Version X` produce
+`dist/nucleus-dll-X-windows-x64.zip` (~9 MB) con `nucleus.dll`, la import lib, el
+header C, el binding C# y un README. Ejemplo end-to-end ejecutable en
+[`examples/ffi-smoke`](examples/ffi-smoke).
+
 ## Arquitectura
 
 ```
 crates/
-├── core/   (nucleus-core)  — librería, sin dependencias HTTP
+├── core/   (nucleus-core)  — librería del motor, sin dependencias HTTP
 │   ├── error.rs        NucleusError + Result
 │   ├── id.rs           DomainId/DocumentId/ChunkId/TagId/JobId/TokenId (newtypes)
 │   ├── model/          Domain, Document, Chunk, Tag
@@ -80,6 +146,9 @@ crates/
 │   ├── jobs/           cola persistida + workers
 │   ├── auth.rs         ApiToken, Scope, hashing/verificación
 │   └── engine.rs       Engine: une todo (ingest / search / admin)
+├── ffi/    (nucleus-ffi)    — C ABI (cdylib): nucleus.dll para embeber en apps
+│   ├── src/lib.rs      funciones extern "C" + borde JSON
+│   └── include/nucleus.h   header C para C/C++
 └── server/ (nucleus-server) — binario HTTP (axum)
     └── src/{main,app,routes}.rs
 ```
@@ -117,7 +186,7 @@ Variables de entorno (con sus valores por defecto):
 
 | Variable               | Defecto              | Descripción                              |
 |------------------------|----------------------|------------------------------------------|
-| `NUCLEUS_DB`           | `nucleus.redb`       | Ruta del fichero de base de datos        |
+| `NUCLEUS_DB`           | `%ProgramData%\Nucleus\nucleus.redb` (Win) · `/var/lib/nucleus/nucleus.redb` | Ruta del fichero de base de datos |
 | `NUCLEUS_ADDR`         | `127.0.0.1:8080`     | Dirección de escucha                     |
 | `NUCLEUS_WORKERS`      | `2`                  | Nº de workers de jobs                    |
 | `NUCLEUS_MODEL_CACHE`  | (caché de fastembed) | Directorio donde cachear los modelos     |
