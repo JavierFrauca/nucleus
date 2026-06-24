@@ -2088,7 +2088,7 @@ dependencies = [
 
 [[package]]
 name = "nucleus-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bincode 2.0.1",
  "calamine",
@@ -2113,7 +2113,7 @@ dependencies = [
 
 [[package]]
 name = "nucleus-ffi"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "nucleus-core",
  "serde",
@@ -2122,7 +2122,7 @@ dependencies = [
 
 [[package]]
 name = "nucleus-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "http-body-util",
