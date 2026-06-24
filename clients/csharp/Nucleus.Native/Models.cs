@@ -47,5 +47,9 @@ public sealed record Chunk(
 /// <summary>One ranked search result.</summary>
 public sealed record SearchHit(Chunk Chunk, float Score, string? Snippet);
 
-/// <summary>Outcome of a synchronous ingest. <c>Chars</c> is set for file ingests.</summary>
-public sealed record IngestResult(ulong DocumentId, int ChunkCount, int Chars = 0);
+/// <summary>
+/// Outcome of a synchronous ingest. <c>Chars</c> is set for file ingests. When
+/// <c>Duplicate</c> is true the content was already indexed (same hash) — no new
+/// document was created and <c>DocumentId</c> points at the existing one.
+/// </summary>
+public sealed record IngestResult(ulong DocumentId, int ChunkCount, int Chars = 0, bool Duplicate = false);

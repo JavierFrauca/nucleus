@@ -50,13 +50,15 @@ const char *nucleus_last_error(void);
 int nucleus_create_domain(NucleusEngine *handle, const char *input_json, char **out_json);
 
 /* {"domain_id":N,"title":"...","text":"...","source":null,"metadata":{},
- *  "labels":[],"subdomain":null} -> {"document_id":N,"chunk_count":M} */
+ *  "labels":[],"subdomain":null} -> {"document_id":N,"chunk_count":M,"duplicate":false}
+ * Deduplicated by content hash within the domain: identical text returns the existing
+ * document with chunk_count 0 and duplicate=true. */
 int nucleus_ingest_text(NucleusEngine *handle, const char *input_json, char **out_json);
 
 /* Ingest a raw file; the engine extracts text by format (pdf/docx/xlsx/html/md/txt).
  * Metadata in input_json: {"domain_id":N,"filename":"x.pdf","title":null,"labels":[],
- * "subdomain":null}; the bytes are passed separately.
- * -> {"document_id":N,"chunk_count":M,"chars":C} */
+ * "subdomain":null}; the bytes are passed separately. Same hash-dedup as ingest_text.
+ * -> {"document_id":N,"chunk_count":M,"chars":C,"duplicate":false} */
 int nucleus_ingest_file(NucleusEngine *handle, const char *input_json,
                         const unsigned char *bytes, size_t bytes_len, char **out_json);
 

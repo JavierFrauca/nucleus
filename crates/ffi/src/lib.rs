@@ -42,7 +42,8 @@ use nucleus_core::extract::extract_text;
 use nucleus_core::id::{ChunkId, DocumentId, DomainId, SubdomainId, TagId};
 use nucleus_core::index::IndexKind;
 use nucleus_core::storage::Storage;
-use nucleus_core::Engine;
+use nucleus_core::util::sha256_hex;
+use nucleus_core::{Engine, NucleusError};
 
 // ---------------------------------------------------------------------------
 // Status codes
@@ -302,6 +303,46 @@ pub unsafe extern "C" fn nucleus_create_domain(
 // ingest
 // ---------------------------------------------------------------------------
 
+/// Shared ingest tail: deduplicate by content hash within the domain, then (if new)
+/// resolve subdomain/labels by name, create the document, embed/index it and record
+/// the hash. Returns `(document_id, chunk_count, duplicate)`; on a duplicate, the
+/// existing document id with `chunk_count = 0`. Errors map to `(code, message)`.
+fn dedup_and_ingest(
+    eng: &Engine,
+    domain_id: DomainId,
+    title: &str,
+    source: Option<String>,
+    metadata: BTreeMap<String, String>,
+    labels: &[String],
+    subdomain: &Option<String>,
+    text: String,
+) -> Result<(u64, usize, bool), (i32, String)> {
+    let err = |e: NucleusError| (NUCLEUS_ERR_ENGINE, e.to_string());
+
+    let hash = sha256_hex(text.as_bytes());
+    match eng.find_document_by_hash(domain_id, &hash) {
+        Ok(Some(existing)) => return Ok((existing.get(), 0, true)),
+        Ok(None) => {}
+        Err(e) => return Err(err(e)),
+    }
+
+    let subdomain_id = match subdomain {
+        Some(name) => Some(eng.get_or_create_subdomain(domain_id, name, "").map_err(err)?.id),
+        None => None,
+    };
+    let mut tags = Vec::with_capacity(labels.len());
+    for label in labels {
+        tags.push(eng.get_or_create_label(domain_id, label).map_err(err)?.id);
+    }
+
+    let doc = eng
+        .create_document_record(domain_id, subdomain_id, title, source, metadata, tags)
+        .map_err(err)?;
+    let chunk_count = eng.populate_document(&doc, IngestBody::Text(text)).map_err(err)?;
+    eng.set_document_hash(domain_id, doc.id, &hash).map_err(err)?;
+    Ok((doc.id.get(), chunk_count, false))
+}
+
 #[derive(Deserialize)]
 struct IngestInput {
     domain_id: u64,
@@ -340,38 +381,21 @@ pub unsafe extern "C" fn nucleus_ingest_text(
     };
     let domain_id = DomainId::from(input.domain_id);
 
-    // Resolve subdomain + labels by name (idempotent get-or-create).
-    let subdomain_id = match &input.subdomain {
-        Some(name) => match eng.get_or_create_subdomain(domain_id, name, "") {
-            Ok(s) => Some(s.id),
-            Err(e) => return fail(out_json, NUCLEUS_ERR_ENGINE, e.to_string()),
-        },
-        None => None,
-    };
-    let mut tags = Vec::with_capacity(input.labels.len());
-    for label in &input.labels {
-        match eng.get_or_create_label(domain_id, label) {
-            Ok(t) => tags.push(t.id),
-            Err(e) => return fail(out_json, NUCLEUS_ERR_ENGINE, e.to_string()),
-        }
-    }
-
-    let doc = match eng.create_document_record(
+    match dedup_and_ingest(
+        eng,
         domain_id,
-        subdomain_id,
         &input.title,
         input.source,
         input.metadata,
-        tags,
+        &input.labels,
+        &input.subdomain,
+        input.text,
     ) {
-        Ok(d) => d,
-        Err(e) => return fail(out_json, NUCLEUS_ERR_ENGINE, e.to_string()),
-    };
-    match eng.populate_document(&doc, IngestBody::Text(input.text)) {
-        Ok(chunk_count) => {
-            ok_json(out_json, json!({ "document_id": doc.id, "chunk_count": chunk_count }))
-        }
-        Err(e) => fail(out_json, NUCLEUS_ERR_ENGINE, e.to_string()),
+        Ok((document_id, chunk_count, duplicate)) => ok_json(
+            out_json,
+            json!({ "document_id": document_id, "chunk_count": chunk_count, "duplicate": duplicate }),
+        ),
+        Err((code, msg)) => fail(out_json, code, msg),
     }
 }
 
@@ -428,40 +452,23 @@ pub unsafe extern "C" fn nucleus_ingest_file(
     };
     let chars = text.chars().count();
     let domain_id = DomainId::from(input.domain_id);
-
-    let subdomain_id = match &input.subdomain {
-        Some(name) => match eng.get_or_create_subdomain(domain_id, name, "") {
-            Ok(s) => Some(s.id),
-            Err(e) => return fail(out_json, NUCLEUS_ERR_ENGINE, e.to_string()),
-        },
-        None => None,
-    };
-    let mut tags = Vec::with_capacity(input.labels.len());
-    for label in &input.labels {
-        match eng.get_or_create_label(domain_id, label) {
-            Ok(t) => tags.push(t.id),
-            Err(e) => return fail(out_json, NUCLEUS_ERR_ENGINE, e.to_string()),
-        }
-    }
-
     let title = input.title.unwrap_or_else(|| input.filename.clone());
-    let doc = match eng.create_document_record(
+
+    match dedup_and_ingest(
+        eng,
         domain_id,
-        subdomain_id,
         &title,
         input.source,
         input.metadata,
-        tags,
+        &input.labels,
+        &input.subdomain,
+        text,
     ) {
-        Ok(d) => d,
-        Err(e) => return fail(out_json, NUCLEUS_ERR_ENGINE, e.to_string()),
-    };
-    match eng.populate_document(&doc, IngestBody::Text(text)) {
-        Ok(chunk_count) => ok_json(
+        Ok((document_id, chunk_count, duplicate)) => ok_json(
             out_json,
-            json!({ "document_id": doc.id, "chunk_count": chunk_count, "chars": chars }),
+            json!({ "document_id": document_id, "chunk_count": chunk_count, "chars": chars, "duplicate": duplicate }),
         ),
-        Err(e) => fail(out_json, NUCLEUS_ERR_ENGINE, e.to_string()),
+        Err((code, msg)) => fail(out_json, code, msg),
     }
 }
 

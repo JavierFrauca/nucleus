@@ -87,4 +87,8 @@ var md = System.Text.Encoding.UTF8.GetBytes("# Política de privacidad\n\nLos da
 IngestResult fr = engine.IngestFile(domain.Id, "privacidad.md", md, labels: ["legal"]);
 Console.WriteLine($"[ingest_file] privacidad.md → doc {fr.DocumentId}, {fr.ChunkCount} chunk(s), {fr.Chars} chars");
 
+// --- dedup: re-ingesting identical content returns the existing doc ---------
+IngestResult dup = engine.IngestFile(domain.Id, "privacidad.md", md, labels: ["legal"]);
+Console.WriteLine($"[dedup] mismo fichero otra vez → doc {dup.DocumentId}, duplicate={dup.Duplicate}, chunks={dup.ChunkCount}");
+
 Console.WriteLine("\nSMOKE TEST OK");

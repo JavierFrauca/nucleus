@@ -95,7 +95,9 @@
             var bytes = ms.ToArray();
             var label0 = label;
             var r = await Task.Run(() => Nucleus.IngestFile(file.Name, bytes, label0));
-            ingestMsg = $"Fichero '{file.Name}' indexado: documento {r.DocumentId}, {r.ChunkCount} chunk(s), {r.Chars} caracteres.";
+            ingestMsg = r.Duplicate
+                ? $"Fichero '{file.Name}' ya estaba indexado (documento {r.DocumentId}); no se duplica."
+                : $"Fichero '{file.Name}' indexado: documento {r.DocumentId}, {r.ChunkCount} chunk(s), {r.Chars} caracteres.";
             docCount = Nucleus.DocumentCount();
         }
         catch (Exception ex)
