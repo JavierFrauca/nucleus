@@ -52,10 +52,11 @@ if ($dlls) {
 Copy-Item "crates/ffi/include/nucleus.h" $stage -Force
 Copy-Item "packaging/dll-README.md" (Join-Path $stage "README.md") -Force
 
-# C# P/Invoke binding (source — consumers add it as a project reference).
+# C# P/Invoke binding (source — consumers add it as a project reference). Ship all
+# of the binding's .cs files (NucleusNative.cs + Models.cs) plus the csproj.
 $csDst = Join-Path $stage "csharp"
 New-Item -ItemType Directory -Force -Path $csDst | Out-Null
-Copy-Item "clients/csharp/Nucleus.Native/NucleusNative.cs" $csDst -Force
+Get-ChildItem "clients/csharp/Nucleus.Native" -Filter *.cs | ForEach-Object { Copy-Item $_.FullName $csDst -Force }
 Copy-Item "clients/csharp/Nucleus.Native/Nucleus.Native.csproj" $csDst -Force
 
 $zip = Join-Path $OutDir "nucleus-dll-$Version-windows-x64.zip"
