@@ -38,7 +38,7 @@ lenguaje de consulta para filtros ricos.
 El bundle del **modo embebido** (Windows x64) está disponible en
 [**Releases**](https://github.com/JavierFrauca/nucleus/releases/latest):
 
-- **[nucleus-dll-0.1.1-windows-x64.zip](https://github.com/JavierFrauca/nucleus/releases/download/v0.1.1/nucleus-dll-0.1.1-windows-x64.zip)** (~9 MB) — `nucleus.dll` autocontenida + import lib + header C [`nucleus.h`](crates/ffi/include/nucleus.h) + binding C# tipado + README.
+- **[nucleus-dll-0.1.2-windows-x64.zip](https://github.com/JavierFrauca/nucleus/releases/download/v0.1.2/nucleus-dll-0.1.2-windows-x64.zip)** (~9 MB) — `nucleus.dll` autocontenida + import lib + header C [`nucleus.h`](crates/ffi/include/nucleus.h) + binding C# tipado + README.
 
 Suelta `nucleus.dll` junto a tu ejecutable y referencia el binding C# (o usa el C ABI
 desde C/C++). En Windows la DLL es autocontenida (ONNX Runtime enlazado estático); la

@@ -3,7 +3,7 @@
 Checklist priorizada para que Nucleus pueda anunciarse como **estable / production-ready**
 sin asteriscos. Marca lo hecho y lo que falta; al final, las decisiones que dependen de ti.
 
-## Estado actual (v0.1.1)
+## Estado actual (v0.1.2)
 
 - ✅ **90 tests** en verde (motor, integración del motor, **C-ABI del FFI**, e2e HTTP) + clippy `-D warnings` + `cargo fmt --check`.
 - ✅ Hardening del servidor: auth por token con scopes, dedup por hash, apagado ordenado con volcado de índices, versionado de esquema con gate de migración, `/healthz` + `/readyz` + `/metrics`, CORS opt-in, listados paginados, **rate limiting por IP** (token-bucket, `NUCLEUS_RATE_LIMIT_RPM`), Docker.
