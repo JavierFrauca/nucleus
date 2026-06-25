@@ -73,6 +73,8 @@ pub struct AppState {
     pub data_dir: PathBuf,
     /// Runtime-adjustable backup schedule.
     pub schedule: Arc<RwLock<ScheduleConfig>>,
+    /// Per-IP request budget per minute. `0` disables rate limiting.
+    pub rate_limit_rpm: u32,
 }
 
 /// Backup schedule (runtime-adjustable via the API).
@@ -160,6 +162,8 @@ pub struct Config {
     pub backup_full_every: u32,
     /// How many full backups (and their differentials) to retain.
     pub backup_keep_fulls: usize,
+    /// Per-IP request budget per minute. `0` (default) disables rate limiting.
+    pub rate_limit_rpm: u32,
 }
 
 impl Config {
@@ -253,6 +257,10 @@ impl Config {
                 .unwrap_or(7),
             backup_dir,
             index_dir,
+            rate_limit_rpm: env::var("NUCLEUS_RATE_LIMIT_RPM")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
         }
     }
 }

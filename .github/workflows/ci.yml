@@ -10,7 +10,7 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
-  build-test:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,5 +22,22 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows is the 1.0 target; Linux is the cheap/fast baseline that also
+        # covers the non-Windows code paths. macOS is deferred (future platform).
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Builds every crate (incl. the `nucleus` cdylib) and runs the suite. The
+      # ignored FFI/model-download test is not run here (no `--ignored`), so CI
+      # needs no HuggingFace model. `ort` downloads ONNX Runtime at build time.
       - name: Test
         run: cargo test --workspace

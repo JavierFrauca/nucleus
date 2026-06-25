@@ -2118,6 +2118,7 @@ dependencies = [
  "nucleus-core",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

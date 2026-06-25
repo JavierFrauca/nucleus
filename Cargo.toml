@@ -6,7 +6,7 @@ members = ["crates/core", "crates/server", "crates/ffi"]
 version = "0.1.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/your-org/nucleus"
+repository = "https://github.com/javierfrauca/nucleus"
 rust-version = "1.82"
 
 [workspace.dependencies]

@@ -100,7 +100,9 @@ fn main() {
         }
         println!(
             "{:>10}  {:<6}  ratio flat/sq = {:.2}x\n",
-            "", "", per_vec[0] / per_vec[1]
+            "",
+            "",
+            per_vec[0] / per_vec[1]
         );
     }
 }

@@ -2,8 +2,10 @@
 //! the job queue, then serves the REST API.
 
 mod app;
+mod rate_limit;
 mod routes;
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -145,7 +147,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         index_kind: cfg.index_kind,
         data_dir,
         schedule,
+        rate_limit_rpm: cfg.rate_limit_rpm,
     };
+    tracing::info!(
+        "rate limiting: {}",
+        if cfg.rate_limit_rpm > 0 {
+            format!("{} req/min per IP", cfg.rate_limit_rpm)
+        } else {
+            "off".to_string()
+        }
+    );
 
     let mut app = routes::router(state);
     if cfg.cors_any {
@@ -154,9 +165,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = tokio::net::TcpListener::bind(&cfg.addr).await?;
     tracing::info!("Nucleus listening on http://{}", cfg.addr);
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(handle_for_shutdown))
-        .await?;
+    // `into_make_service_with_connect_info` exposes the peer address to handlers
+    // and the rate-limit middleware (which keys on the client IP).
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal(handle_for_shutdown))
+    .await?;
     Ok(())
 }
 
@@ -180,7 +196,12 @@ fn start_backup_scheduler(
         loop {
             let (enabled, interval, full_every, keep) = {
                 let s = schedule.read().unwrap();
-                (s.enabled, s.interval_secs, s.full_every.max(1), s.keep_fulls)
+                (
+                    s.enabled,
+                    s.interval_secs,
+                    s.full_every.max(1),
+                    s.keep_fulls,
+                )
             };
             if !enabled || interval == 0 {
                 // Disabled: re-check periodically (the schedule may be enabled later).
