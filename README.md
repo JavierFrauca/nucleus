@@ -9,9 +9,9 @@ proceso**.
 
 > **Cambio de rumbo (2026-06):** el foco de Nucleus es ahora el **modo embebido** —
 > una base de datos vectorial *ad-hoc* que tu app referencia como **DLL nativa**
-> (`nucleus.dll`, **Windows x64**; Linux/macOS quedan para versiones futuras), sin red,
-> sin sidecar, sin servicio que desplegar: «SQLite, pero para RAG con embeddings dentro».
-> El servidor HTTP sigue existiendo como **segundo modo** para despliegues cliente-servidor.
+> (`nucleus.dll`, **Windows x64**), sin red, sin sidecar, sin servicio que desplegar:
+> «SQLite, pero para RAG con embeddings dentro». El servidor HTTP sigue existiendo como
+> **segundo modo** para despliegues cliente-servidor.
 
 ## Dos modos, un mismo motor
 
@@ -38,7 +38,7 @@ lenguaje de consulta para filtros ricos.
 El bundle del **modo embebido** (Windows x64) está disponible en
 [**Releases**](https://github.com/JavierFrauca/nucleus/releases/latest):
 
-- **[nucleus-dll-0.1.2-windows-x64.zip](https://github.com/JavierFrauca/nucleus/releases/download/v0.1.2/nucleus-dll-0.1.2-windows-x64.zip)** (~9 MB) — `nucleus.dll` autocontenida + import lib + header C [`nucleus.h`](crates/ffi/include/nucleus.h) + binding C# tipado + README.
+- **[nucleus-dll-0.1.2-windows-x64.zip](https://github.com/JavierFrauca/nucleus/releases/download/v0.1.2/nucleus-dll-0.1.2-windows-x64.zip)** (~11 MB) — `nucleus.dll` autocontenida + import lib + header C [`nucleus.h`](crates/ffi/include/nucleus.h) + binding C# tipado + README.
 
 Suelta `nucleus.dll` junto a tu ejecutable y referencia el binding C# (o usa el C ABI
 desde C/C++). En Windows la DLL es autocontenida (ONNX Runtime enlazado estático); la
@@ -111,9 +111,8 @@ demo headless de Node, y un mini-front de navegador con 2 pantallas (ingesta y b
 ## Modo embebido (DLL)
 
 El modo **prioritario**: Nucleus dentro de tu proceso, sin HTTP. Tu app enlaza
-`nucleus.dll` y llama al motor directamente. **La 1.0 se distribuye solo para Windows
-x64**; los artefactos de Linux/macOS (`libnucleus.so`/`.dylib`, que el crate ya puede
-producir) llegarán en versiones futuras. En Windows la DLL es **autocontenida** (~28 MB): `ort`/ONNX Runtime se
+`nucleus.dll` y llama al motor directamente. **Se distribuye solo para Windows x64**
+(otras plataformas, más adelante). En Windows la DLL es **autocontenida** (~28 MB): `ort`/ONNX Runtime se
 enlaza **estáticamente**, así que no hay que repartir `onnxruntime.dll`. Lo único que
 se descarga la primera vez es el modelo de embeddings (~450 MB).
 
@@ -155,7 +154,7 @@ foreach (SearchHit hit in engine.Search(domain.Id, "cómo terminar un contrato a
 `/nucleus/nucleus.redb` (otros). El directorio se crea solo.
 
 **Empaquetado**: `packaging/build-dll.ps1 -Version X` produce
-`dist/nucleus-dll-X-windows-x64.zip` (~9 MB) con `nucleus.dll`, la import lib, el
+`dist/nucleus-dll-X-windows-x64.zip` (~11 MB) con `nucleus.dll`, la import lib, el
 header C, el binding C# y un README. Ejemplo end-to-end ejecutable en
 [`examples/ffi-smoke`](examples/ffi-smoke).
 
