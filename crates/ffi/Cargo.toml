@@ -24,3 +24,6 @@ serde_json = "1"
 default = []
 # Forward GPU (ONNX DirectML) embedding to the core engine.
 gpu = ["nucleus-core/gpu"]
+
+[dev-dependencies]
+tempfile = "3"

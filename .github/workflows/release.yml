@@ -1,0 +1,45 @@
+name: Release
+
+# Build the Windows DLL bundle and publish it as a GitHub Release when a version
+# tag is pushed (e.g. `v0.1.2`). The version handed to the packaging script is the
+# tag without its leading `v`.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # create the release and upload the asset
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  windows-bundle:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Derive version from tag
+        id: ver
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      # Produces dist/nucleus-dll-<version>-windows-x64.zip (nucleus.dll + import
+      # lib + nucleus.h + C# binding + README). `ort` links ONNX Runtime statically.
+      - name: Build DLL bundle
+        shell: pwsh
+        run: pwsh packaging/build-dll.ps1 -Version ${{ steps.ver.outputs.version }}
+
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/nucleus-dll-${{ steps.ver.outputs.version }}-windows-x64.zip" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes

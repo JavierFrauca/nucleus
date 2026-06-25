@@ -152,11 +152,13 @@ fn default_db_path() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
     #[cfg(not(windows))]
-    let base = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| {
-        std::env::var_os("HOME")
-            .map(|h| PathBuf::from(h).join(".local/share"))
-            .unwrap_or_else(|| PathBuf::from("."))
-    });
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("HOME")
+                .map(|h| PathBuf::from(h).join(".local/share"))
+                .unwrap_or_else(|| PathBuf::from("."))
+        });
     base.join("Nucleus").join("nucleus.redb")
 }
 
@@ -173,16 +175,30 @@ pub unsafe extern "C" fn nucleus_open(
     out_handle: *mut *mut Engine,
 ) -> i32 {
     if out_handle.is_null() {
-        return fail(ptr::null_mut(), NUCLEUS_ERR_NULL_ARG, "out_handle is null".into());
+        return fail(
+            ptr::null_mut(),
+            NUCLEUS_ERR_NULL_ARG,
+            "out_handle is null".into(),
+        );
     }
     *out_handle = ptr::null_mut();
 
     let Some(cfg_str) = cstr(config_json) else {
-        return fail(ptr::null_mut(), NUCLEUS_ERR_UTF8, "config_json is null or not UTF-8".into());
+        return fail(
+            ptr::null_mut(),
+            NUCLEUS_ERR_UTF8,
+            "config_json is null or not UTF-8".into(),
+        );
     };
     let cfg: OpenConfig = match serde_json::from_str(cfg_str) {
         Ok(c) => c,
-        Err(e) => return fail(ptr::null_mut(), NUCLEUS_ERR_JSON, format!("invalid config JSON: {e}")),
+        Err(e) => {
+            return fail(
+                ptr::null_mut(),
+                NUCLEUS_ERR_JSON,
+                format!("invalid config JSON: {e}"),
+            )
+        }
     };
 
     let index_kind = match cfg.index_kind.as_deref() {
@@ -207,24 +223,51 @@ pub unsafe extern "C" fn nucleus_open(
     };
     if let Some(parent) = db_path.parent().filter(|p| !p.as_os_str().is_empty()) {
         if let Err(e) = std::fs::create_dir_all(parent) {
-            return fail(ptr::null_mut(), NUCLEUS_ERR_ENGINE, format!("create data dir: {e}"));
+            return fail(
+                ptr::null_mut(),
+                NUCLEUS_ERR_ENGINE,
+                format!("create data dir: {e}"),
+            );
         }
     }
     if let Some(dir) = &cfg.index_dir {
         if let Err(e) = std::fs::create_dir_all(dir) {
-            return fail(ptr::null_mut(), NUCLEUS_ERR_ENGINE, format!("create index dir: {e}"));
+            return fail(
+                ptr::null_mut(),
+                NUCLEUS_ERR_ENGINE,
+                format!("create index dir: {e}"),
+            );
         }
     }
 
     let storage = match Storage::open(&db_path) {
         Ok(s) => s,
-        Err(e) => return fail(ptr::null_mut(), NUCLEUS_ERR_ENGINE, format!("open storage: {e}")),
+        Err(e) => {
+            return fail(
+                ptr::null_mut(),
+                NUCLEUS_ERR_ENGINE,
+                format!("open storage: {e}"),
+            )
+        }
     };
-    let embedder: Arc<dyn Embedder> =
-        Arc::new(LocalEmbedder::with_options(cfg.model_cache.map(PathBuf::from), cfg.gpu));
-    let engine = match Engine::open(storage, embedder, index_kind, cfg.index_dir.map(PathBuf::from)) {
+    let embedder: Arc<dyn Embedder> = Arc::new(LocalEmbedder::with_options(
+        cfg.model_cache.map(PathBuf::from),
+        cfg.gpu,
+    ));
+    let engine = match Engine::open(
+        storage,
+        embedder,
+        index_kind,
+        cfg.index_dir.map(PathBuf::from),
+    ) {
         Ok(e) => e,
-        Err(e) => return fail(ptr::null_mut(), NUCLEUS_ERR_ENGINE, format!("open engine: {e}")),
+        Err(e) => {
+            return fail(
+                ptr::null_mut(),
+                NUCLEUS_ERR_ENGINE,
+                format!("open engine: {e}"),
+            )
+        }
     };
 
     *out_handle = Box::into_raw(Box::new(engine));
@@ -287,7 +330,11 @@ pub unsafe extern "C" fn nucleus_create_domain(
     out_json: *mut *mut c_char,
 ) -> i32 {
     let Some(eng) = engine(handle) else {
-        return fail(out_json, NUCLEUS_ERR_NULL_ARG, "engine handle is null".into());
+        return fail(
+            out_json,
+            NUCLEUS_ERR_NULL_ARG,
+            "engine handle is null".into(),
+        );
     };
     let input: CreateDomainInput = match parse(input_json) {
         Ok(v) => v,
@@ -307,6 +354,7 @@ pub unsafe extern "C" fn nucleus_create_domain(
 /// resolve subdomain/labels by name, create the document, embed/index it and record
 /// the hash. Returns `(document_id, chunk_count, duplicate)`; on a duplicate, the
 /// existing document id with `chunk_count = 0`. Errors map to `(code, message)`.
+#[allow(clippy::too_many_arguments)]
 fn dedup_and_ingest(
     eng: &Engine,
     domain_id: DomainId,
@@ -327,7 +375,11 @@ fn dedup_and_ingest(
     }
 
     let subdomain_id = match subdomain {
-        Some(name) => Some(eng.get_or_create_subdomain(domain_id, name, "").map_err(err)?.id),
+        Some(name) => Some(
+            eng.get_or_create_subdomain(domain_id, name, "")
+                .map_err(err)?
+                .id,
+        ),
         None => None,
     };
     let mut tags = Vec::with_capacity(labels.len());
@@ -338,8 +390,11 @@ fn dedup_and_ingest(
     let doc = eng
         .create_document_record(domain_id, subdomain_id, title, source, metadata, tags)
         .map_err(err)?;
-    let chunk_count = eng.populate_document(&doc, IngestBody::Text(text)).map_err(err)?;
-    eng.set_document_hash(domain_id, doc.id, &hash).map_err(err)?;
+    let chunk_count = eng
+        .populate_document(&doc, IngestBody::Text(text))
+        .map_err(err)?;
+    eng.set_document_hash(domain_id, doc.id, &hash)
+        .map_err(err)?;
     Ok((doc.id.get(), chunk_count, false))
 }
 
@@ -373,7 +428,11 @@ pub unsafe extern "C" fn nucleus_ingest_text(
     out_json: *mut *mut c_char,
 ) -> i32 {
     let Some(eng) = engine(handle) else {
-        return fail(out_json, NUCLEUS_ERR_NULL_ARG, "engine handle is null".into());
+        return fail(
+            out_json,
+            NUCLEUS_ERR_NULL_ARG,
+            "engine handle is null".into(),
+        );
     };
     let input: IngestInput = match parse(input_json) {
         Ok(v) => v,
@@ -434,10 +493,18 @@ pub unsafe extern "C" fn nucleus_ingest_file(
     out_json: *mut *mut c_char,
 ) -> i32 {
     let Some(eng) = engine(handle) else {
-        return fail(out_json, NUCLEUS_ERR_NULL_ARG, "engine handle is null".into());
+        return fail(
+            out_json,
+            NUCLEUS_ERR_NULL_ARG,
+            "engine handle is null".into(),
+        );
     };
     if bytes.is_null() || bytes_len == 0 {
-        return fail(out_json, NUCLEUS_ERR_NULL_ARG, "file bytes are empty".into());
+        return fail(
+            out_json,
+            NUCLEUS_ERR_NULL_ARG,
+            "file bytes are empty".into(),
+        );
     }
     let input: IngestFileInput = match parse(input_json) {
         Ok(v) => v,
@@ -526,7 +593,11 @@ pub unsafe extern "C" fn nucleus_search(
     out_json: *mut *mut c_char,
 ) -> i32 {
     let Some(eng) = engine(handle) else {
-        return fail(out_json, NUCLEUS_ERR_NULL_ARG, "engine handle is null".into());
+        return fail(
+            out_json,
+            NUCLEUS_ERR_NULL_ARG,
+            "engine handle is null".into(),
+        );
     };
     let input: SearchInput = match parse(input_json) {
         Ok(v) => v,
@@ -564,7 +635,11 @@ pub unsafe extern "C" fn nucleus_search(
         k: input.k,
         tags,
         match_all: input.match_all,
-        document_ids: input.document_ids.into_iter().map(DocumentId::from).collect(),
+        document_ids: input
+            .document_ids
+            .into_iter()
+            .map(DocumentId::from)
+            .collect(),
         subdomain,
         filter: input.filter,
         diversity: input.diversity,
@@ -573,7 +648,11 @@ pub unsafe extern "C" fn nucleus_search(
         Ok(hits) => {
             let out: Vec<HitOut> = hits
                 .into_iter()
-                .map(|h| HitOut { chunk: h.chunk, score: h.score, snippet: h.snippet })
+                .map(|h| HitOut {
+                    chunk: h.chunk,
+                    score: h.score,
+                    snippet: h.snippet,
+                })
                 .collect();
             ok_json(out_json, json!({ "hits": out }))
         }
@@ -596,7 +675,11 @@ pub unsafe extern "C" fn nucleus_persist_indexes(
     out_json: *mut *mut c_char,
 ) -> i32 {
     let Some(eng) = engine(handle) else {
-        return fail(out_json, NUCLEUS_ERR_NULL_ARG, "engine handle is null".into());
+        return fail(
+            out_json,
+            NUCLEUS_ERR_NULL_ARG,
+            "engine handle is null".into(),
+        );
     };
     match eng.persist_indexes() {
         Ok(n) => ok_json(out_json, json!({ "persisted": n })),
@@ -613,9 +696,16 @@ pub unsafe extern "C" fn nucleus_persist_indexes(
 /// # Safety
 /// See module docs.
 #[no_mangle]
-pub unsafe extern "C" fn nucleus_list_domains(handle: *mut Engine, out_json: *mut *mut c_char) -> i32 {
+pub unsafe extern "C" fn nucleus_list_domains(
+    handle: *mut Engine,
+    out_json: *mut *mut c_char,
+) -> i32 {
     let Some(eng) = engine(handle) else {
-        return fail(out_json, NUCLEUS_ERR_NULL_ARG, "engine handle is null".into());
+        return fail(
+            out_json,
+            NUCLEUS_ERR_NULL_ARG,
+            "engine handle is null".into(),
+        );
     };
     match eng.list_domains() {
         Ok(domains) => ok_json(out_json, json!({ "domains": domains })),
@@ -639,7 +729,11 @@ pub unsafe extern "C" fn nucleus_list_tags(
     out_json: *mut *mut c_char,
 ) -> i32 {
     let Some(eng) = engine(handle) else {
-        return fail(out_json, NUCLEUS_ERR_NULL_ARG, "engine handle is null".into());
+        return fail(
+            out_json,
+            NUCLEUS_ERR_NULL_ARG,
+            "engine handle is null".into(),
+        );
     };
     let input: DomainRef = match parse(input_json) {
         Ok(v) => v,
@@ -662,7 +756,11 @@ pub unsafe extern "C" fn nucleus_list_subdomains(
     out_json: *mut *mut c_char,
 ) -> i32 {
     let Some(eng) = engine(handle) else {
-        return fail(out_json, NUCLEUS_ERR_NULL_ARG, "engine handle is null".into());
+        return fail(
+            out_json,
+            NUCLEUS_ERR_NULL_ARG,
+            "engine handle is null".into(),
+        );
     };
     let input: DomainRef = match parse(input_json) {
         Ok(v) => v,
@@ -699,7 +797,11 @@ pub unsafe extern "C" fn nucleus_list_documents(
     out_json: *mut *mut c_char,
 ) -> i32 {
     let Some(eng) = engine(handle) else {
-        return fail(out_json, NUCLEUS_ERR_NULL_ARG, "engine handle is null".into());
+        return fail(
+            out_json,
+            NUCLEUS_ERR_NULL_ARG,
+            "engine handle is null".into(),
+        );
     };
     let input: ListDocumentsInput = match parse(input_json) {
         Ok(v) => v,
@@ -727,7 +829,11 @@ pub unsafe extern "C" fn nucleus_get_document(
     out_json: *mut *mut c_char,
 ) -> i32 {
     let Some(eng) = engine(handle) else {
-        return fail(out_json, NUCLEUS_ERR_NULL_ARG, "engine handle is null".into());
+        return fail(
+            out_json,
+            NUCLEUS_ERR_NULL_ARG,
+            "engine handle is null".into(),
+        );
     };
     let input: DocumentRef = match parse(input_json) {
         Ok(v) => v,
@@ -751,7 +857,11 @@ pub unsafe extern "C" fn nucleus_delete_document(
     out_json: *mut *mut c_char,
 ) -> i32 {
     let Some(eng) = engine(handle) else {
-        return fail(out_json, NUCLEUS_ERR_NULL_ARG, "engine handle is null".into());
+        return fail(
+            out_json,
+            NUCLEUS_ERR_NULL_ARG,
+            "engine handle is null".into(),
+        );
     };
     let input: DocumentRef = match parse(input_json) {
         Ok(v) => v,
@@ -791,7 +901,11 @@ pub unsafe extern "C" fn nucleus_chunk_context(
     out_json: *mut *mut c_char,
 ) -> i32 {
     let Some(eng) = engine(handle) else {
-        return fail(out_json, NUCLEUS_ERR_NULL_ARG, "engine handle is null".into());
+        return fail(
+            out_json,
+            NUCLEUS_ERR_NULL_ARG,
+            "engine handle is null".into(),
+        );
     };
     let input: ChunkContextInput = match parse(input_json) {
         Ok(v) => v,
@@ -824,7 +938,11 @@ pub unsafe extern "C" fn nucleus_rename_domain(
     out_json: *mut *mut c_char,
 ) -> i32 {
     let Some(eng) = engine(handle) else {
-        return fail(out_json, NUCLEUS_ERR_NULL_ARG, "engine handle is null".into());
+        return fail(
+            out_json,
+            NUCLEUS_ERR_NULL_ARG,
+            "engine handle is null".into(),
+        );
     };
     let input: RenameDomainInput = match parse(input_json) {
         Ok(v) => v,
@@ -848,7 +966,11 @@ pub unsafe extern "C" fn nucleus_delete_domain(
     out_json: *mut *mut c_char,
 ) -> i32 {
     let Some(eng) = engine(handle) else {
-        return fail(out_json, NUCLEUS_ERR_NULL_ARG, "engine handle is null".into());
+        return fail(
+            out_json,
+            NUCLEUS_ERR_NULL_ARG,
+            "engine handle is null".into(),
+        );
     };
     let input: DomainRef = match parse(input_json) {
         Ok(v) => v,
@@ -877,7 +999,11 @@ pub unsafe extern "C" fn nucleus_delete_subdomain(
     out_json: *mut *mut c_char,
 ) -> i32 {
     let Some(eng) = engine(handle) else {
-        return fail(out_json, NUCLEUS_ERR_NULL_ARG, "engine handle is null".into());
+        return fail(
+            out_json,
+            NUCLEUS_ERR_NULL_ARG,
+            "engine handle is null".into(),
+        );
     };
     let input: SubdomainRef = match parse(input_json) {
         Ok(v) => v,
@@ -911,7 +1037,11 @@ pub unsafe extern "C" fn nucleus_update_tag(
     out_json: *mut *mut c_char,
 ) -> i32 {
     let Some(eng) = engine(handle) else {
-        return fail(out_json, NUCLEUS_ERR_NULL_ARG, "engine handle is null".into());
+        return fail(
+            out_json,
+            NUCLEUS_ERR_NULL_ARG,
+            "engine handle is null".into(),
+        );
     };
     let input: UpdateTagInput = match parse(input_json) {
         Ok(v) => v,
@@ -944,7 +1074,11 @@ pub unsafe extern "C" fn nucleus_delete_tag(
     out_json: *mut *mut c_char,
 ) -> i32 {
     let Some(eng) = engine(handle) else {
-        return fail(out_json, NUCLEUS_ERR_NULL_ARG, "engine handle is null".into());
+        return fail(
+            out_json,
+            NUCLEUS_ERR_NULL_ARG,
+            "engine handle is null".into(),
+        );
     };
     let input: TagRef = match parse(input_json) {
         Ok(v) => v,
@@ -982,7 +1116,11 @@ pub unsafe extern "C" fn nucleus_update_document(
     out_json: *mut *mut c_char,
 ) -> i32 {
     let Some(eng) = engine(handle) else {
-        return fail(out_json, NUCLEUS_ERR_NULL_ARG, "engine handle is null".into());
+        return fail(
+            out_json,
+            NUCLEUS_ERR_NULL_ARG,
+            "engine handle is null".into(),
+        );
     };
     let input: UpdateDocumentInput = match parse(input_json) {
         Ok(v) => v,
@@ -1011,10 +1149,12 @@ pub unsafe extern "C" fn nucleus_update_document(
 
     let change_subdomain = input.clear_subdomain || input.subdomain.is_some();
     let new_subdomain = match &input.subdomain {
-        Some(name) if !input.clear_subdomain => match eng.get_or_create_subdomain(domain_id, name, "") {
-            Ok(s) => Some(s.id),
-            Err(e) => return fail(out_json, NUCLEUS_ERR_ENGINE, e.to_string()),
-        },
+        Some(name) if !input.clear_subdomain => {
+            match eng.get_or_create_subdomain(domain_id, name, "") {
+                Ok(s) => Some(s.id),
+                Err(e) => return fail(out_json, NUCLEUS_ERR_ENGINE, e.to_string()),
+            }
+        }
         _ => None, // clearing, or no change requested
     };
 
@@ -1045,7 +1185,11 @@ pub unsafe extern "C" fn nucleus_reindex_domain(
     out_json: *mut *mut c_char,
 ) -> i32 {
     let Some(eng) = engine(handle) else {
-        return fail(out_json, NUCLEUS_ERR_NULL_ARG, "engine handle is null".into());
+        return fail(
+            out_json,
+            NUCLEUS_ERR_NULL_ARG,
+            "engine handle is null".into(),
+        );
     };
     let input: ReindexInput = match parse(input_json) {
         Ok(v) => v,
@@ -1082,7 +1226,11 @@ pub unsafe extern "C" fn nucleus_search_multi(
     out_json: *mut *mut c_char,
 ) -> i32 {
     let Some(eng) = engine(handle) else {
-        return fail(out_json, NUCLEUS_ERR_NULL_ARG, "engine handle is null".into());
+        return fail(
+            out_json,
+            NUCLEUS_ERR_NULL_ARG,
+            "engine handle is null".into(),
+        );
     };
     let input: SearchMultiInput = match parse(input_json) {
         Ok(v) => v,
@@ -1103,7 +1251,11 @@ pub unsafe extern "C" fn nucleus_search_multi(
         Ok(hits) => {
             let out: Vec<HitOut> = hits
                 .into_iter()
-                .map(|h| HitOut { chunk: h.chunk, score: h.score, snippet: h.snippet })
+                .map(|h| HitOut {
+                    chunk: h.chunk,
+                    score: h.score,
+                    snippet: h.snippet,
+                })
                 .collect();
             ok_json(out_json, json!({ "hits": out }))
         }
@@ -1120,9 +1272,229 @@ pub unsafe extern "C" fn nucleus_search_multi(
 ///
 /// # Safety
 /// `input_json` must be null or a valid C string.
-unsafe fn parse<T: for<'de> Deserialize<'de>>(input_json: *const c_char) -> Result<T, (i32, String)> {
+unsafe fn parse<T: for<'de> Deserialize<'de>>(
+    input_json: *const c_char,
+) -> Result<T, (i32, String)> {
     let Some(s) = cstr(input_json) else {
         return Err((NUCLEUS_ERR_UTF8, "input_json is null or not UTF-8".into()));
     };
     serde_json::from_str(s).map_err(|e| (NUCLEUS_ERR_JSON, format!("invalid input JSON: {e}")))
+}
+
+// ---------------------------------------------------------------------------
+// tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    //! Exercise the C ABI boundary directly: status codes, the JSON in/out
+    //! contract, the thread-local last-error, and pointer/string lifetimes — the
+    //! `unsafe` surface that the higher-level bindings (C#, C/C++) rely on.
+    //!
+    //! These use the static `LocalEmbedder::dim()` path (no model download), so
+    //! `open` / `create_domain` / `list_domains` run offline. The full
+    //! ingest→search round-trip needs the ~450 MB embedding model, so it lives
+    //! behind `#[ignore]` (run with `cargo test -p nucleus-ffi -- --ignored`).
+
+    use super::*;
+    use serde_json::Value;
+    use std::ffi::{CStr, CString};
+    use tempfile::TempDir;
+
+    /// Open an engine on a throwaway flat database. Returns the handle plus the
+    /// `TempDir` (kept alive so the database file outlives the test).
+    fn open_engine() -> (*mut Engine, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("t.redb");
+        let cfg = CString::new(
+            json!({ "db_path": db.to_string_lossy(), "index_kind": "flat" }).to_string(),
+        )
+        .unwrap();
+        let mut handle: *mut Engine = ptr::null_mut();
+        let code = unsafe { nucleus_open(cfg.as_ptr(), &mut handle) };
+        assert_eq!(code, NUCLEUS_OK, "open failed: {:?}", last_error_string());
+        assert!(!handle.is_null());
+        (handle, dir)
+    }
+
+    /// The current thread's last error message, if any.
+    fn last_error_string() -> Option<String> {
+        let p = nucleus_last_error();
+        if p.is_null() {
+            None
+        } else {
+            Some(unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
+        }
+    }
+
+    /// Invoke a `(handle, input_json, out_json)` FFI function and return its status
+    /// code together with the parsed JSON out-parameter (freed via the library).
+    unsafe fn call(
+        f: unsafe extern "C" fn(*mut Engine, *const c_char, *mut *mut c_char) -> i32,
+        handle: *mut Engine,
+        input: &str,
+    ) -> (i32, Value) {
+        let cin = CString::new(input).unwrap();
+        let mut out: *mut c_char = ptr::null_mut();
+        let code = f(handle, cin.as_ptr(), &mut out);
+        let val = if out.is_null() {
+            Value::Null
+        } else {
+            let s = CStr::from_ptr(out).to_str().unwrap().to_owned();
+            nucleus_string_free(out);
+            serde_json::from_str(&s).unwrap_or(Value::String(s))
+        };
+        (code, val)
+    }
+
+    // --- open / close -----------------------------------------------------
+
+    #[test]
+    fn open_and_close_roundtrip() {
+        let (handle, _dir) = open_engine();
+        unsafe { nucleus_close(handle) };
+    }
+
+    #[test]
+    fn open_rejects_null_out_handle() {
+        let cfg = CString::new("{}").unwrap();
+        let code = unsafe { nucleus_open(cfg.as_ptr(), ptr::null_mut()) };
+        assert_eq!(code, NUCLEUS_ERR_NULL_ARG);
+    }
+
+    #[test]
+    fn open_rejects_null_config() {
+        let mut h: *mut Engine = ptr::null_mut();
+        let code = unsafe { nucleus_open(ptr::null(), &mut h) };
+        assert_eq!(code, NUCLEUS_ERR_UTF8);
+        assert!(h.is_null());
+    }
+
+    #[test]
+    fn open_rejects_invalid_json() {
+        let cfg = CString::new("{ not json").unwrap();
+        let mut h: *mut Engine = ptr::null_mut();
+        let code = unsafe { nucleus_open(cfg.as_ptr(), &mut h) };
+        assert_eq!(code, NUCLEUS_ERR_JSON);
+        assert!(h.is_null(), "handle stays null on failure");
+    }
+
+    #[test]
+    fn open_rejects_unknown_index_kind() {
+        // Validated before any storage is touched, so it needs no real db path.
+        let cfg = CString::new(json!({ "index_kind": "bogus" }).to_string()).unwrap();
+        let mut h: *mut Engine = ptr::null_mut();
+        let code = unsafe { nucleus_open(cfg.as_ptr(), &mut h) };
+        assert_eq!(code, NUCLEUS_ERR_JSON);
+        assert!(h.is_null());
+    }
+
+    // --- domains ----------------------------------------------------------
+
+    #[test]
+    fn create_domain_rejects_null_handle() {
+        let (code, _) = unsafe { call(nucleus_create_domain, ptr::null_mut(), r#"{"name":"x"}"#) };
+        assert_eq!(code, NUCLEUS_ERR_NULL_ARG);
+    }
+
+    #[test]
+    fn create_domain_rejects_invalid_json() {
+        let (handle, _dir) = open_engine();
+        let (code, _) = unsafe { call(nucleus_create_domain, handle, "{ bad") };
+        assert_eq!(code, NUCLEUS_ERR_JSON);
+        unsafe { nucleus_close(handle) };
+    }
+
+    #[test]
+    fn create_domain_returns_typed_object() {
+        let (handle, _dir) = open_engine();
+        let (code, dom) = unsafe { call(nucleus_create_domain, handle, r#"{"name":"legal"}"#) };
+        assert_eq!(code, NUCLEUS_OK);
+        assert_eq!(dom["name"], "legal");
+        // Default model is the 384-dim multilingual e5.
+        assert_eq!(dom["dim"], 384);
+        unsafe { nucleus_close(handle) };
+    }
+
+    #[test]
+    fn list_domains_reflects_creation() {
+        let (handle, _dir) = open_engine();
+        for name in ["legal", "fiscal"] {
+            let (code, _) = unsafe {
+                call(
+                    nucleus_create_domain,
+                    handle,
+                    &json!({ "name": name }).to_string(),
+                )
+            };
+            assert_eq!(code, NUCLEUS_OK);
+        }
+
+        // list_domains takes no input.
+        let mut out: *mut c_char = ptr::null_mut();
+        let code = unsafe { nucleus_list_domains(handle, &mut out) };
+        assert_eq!(code, NUCLEUS_OK);
+        let s = unsafe { CStr::from_ptr(out).to_str().unwrap().to_owned() };
+        unsafe { nucleus_string_free(out) };
+        let v: Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["domains"].as_array().unwrap().len(), 2);
+        unsafe { nucleus_close(handle) };
+    }
+
+    // --- error reporting & memory hygiene --------------------------------
+
+    #[test]
+    fn last_error_is_set_on_failure() {
+        let (handle, _dir) = open_engine();
+        let (code, val) = unsafe { call(nucleus_create_domain, handle, "definitely not json") };
+        assert!(code < 0);
+        // The failure also writes {"error": ...} to the out-parameter.
+        assert!(
+            val.get("error").is_some(),
+            "out_json carries the error: {val}"
+        );
+        assert!(
+            last_error_string().is_some(),
+            "thread-local last error is populated"
+        );
+        unsafe { nucleus_close(handle) };
+    }
+
+    #[test]
+    fn null_pointers_are_safe_to_free_and_close() {
+        // Both must tolerate null without UB (documented contract).
+        unsafe { nucleus_string_free(ptr::null_mut()) };
+        unsafe { nucleus_close(ptr::null_mut()) };
+    }
+
+    // --- full pipeline (needs the embedding model; opt-in) ----------------
+
+    #[test]
+    #[ignore = "downloads the ~450MB embedding model; run with `-- --ignored`"]
+    fn ingest_and_search_roundtrip() {
+        let (handle, _dir) = open_engine();
+        let (code, dom) = unsafe { call(nucleus_create_domain, handle, r#"{"name":"docs"}"#) };
+        assert_eq!(code, NUCLEUS_OK);
+        let domain_id = dom["id"].as_u64().unwrap();
+
+        let ingest = json!({
+            "domain_id": domain_id,
+            "title": "contrato",
+            "text": "el contrato laboral regula la relación entre empresa y trabajador",
+        })
+        .to_string();
+        let (code, out) = unsafe { call(nucleus_ingest_text, handle, &ingest) };
+        assert_eq!(code, NUCLEUS_OK, "{:?}", last_error_string());
+        assert!(out["chunk_count"].as_u64().unwrap() >= 1);
+
+        let query =
+            json!({ "domain_id": domain_id, "query": "contrato laboral", "k": 5 }).to_string();
+        let (code, out) = unsafe { call(nucleus_search, handle, &query) };
+        assert_eq!(code, NUCLEUS_OK);
+        assert!(
+            !out["hits"].as_array().unwrap().is_empty(),
+            "search finds the chunk"
+        );
+        unsafe { nucleus_close(handle) };
+    }
 }

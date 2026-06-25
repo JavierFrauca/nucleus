@@ -56,7 +56,8 @@ fn resolve_structure(
 
 /// Build the application router.
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    let rate_limit_rpm = state.rate_limit_rpm;
+    let app = Router::new()
         .route("/healthz", get(health))
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
@@ -86,13 +87,22 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/maintenance/persist", post(persist_indexes))
         .route("/v1/backups", post(create_backup).get(list_backups))
         .route("/v1/backups/restore", post(restore_backup))
-        .route(
-            "/v1/backups/schedule",
-            get(get_schedule).post(set_schedule),
-        )
+        .route("/v1/backups/schedule", get(get_schedule).post(set_schedule))
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024)) // allow large file uploads
-        .layer(TraceLayer::new_for_http())
-        .with_state(state)
+        .layer(TraceLayer::new_for_http());
+
+    // Rate limiting (outermost, so floods are shed before any work): added last so
+    // it runs first. Off unless NUCLEUS_RATE_LIMIT_RPM > 0.
+    let app = if rate_limit_rpm > 0 {
+        let limiter = std::sync::Arc::new(crate::rate_limit::RateLimit::new(rate_limit_rpm));
+        app.layer(axum::middleware::from_fn(move |req, next| {
+            crate::rate_limit::enforce(limiter.clone(), req, next)
+        }))
+    } else {
+        app
+    };
+
+    app.with_state(state)
 }
 
 async fn health() -> &'static str {
@@ -901,9 +911,7 @@ async fn create_backup(
     let kind = match req.kind.as_deref().unwrap_or("full") {
         "full" => BackupKind::Full,
         "differential" | "diff" => BackupKind::Differential,
-        other => {
-            return Err(NucleusError::invalid(format!("unknown backup kind: {other}")).into())
-        }
+        other => return Err(NucleusError::invalid(format!("unknown backup kind: {other}")).into()),
     };
     let engine = st.engine.current();
     let backups = st.backups.clone();
@@ -1025,8 +1033,7 @@ async fn set_schedule(
     if !ctx.is_admin() {
         return Err(NucleusError::Forbidden.into());
     }
-    *st
-        .schedule
+    *st.schedule
         .write()
         .map_err(|_| NucleusError::invalid("schedule lock poisoned"))? = cfg.clone();
     Ok(Json(cfg))
@@ -1057,6 +1064,10 @@ mod tests {
     }
 
     fn harness() -> (Harness, tempfile::TempDir) {
+        harness_rpm(0)
+    }
+
+    fn harness_rpm(rate_limit_rpm: u32) -> (Harness, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::open(dir.path().join("n.redb")).unwrap();
         let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(64));
@@ -1086,6 +1097,7 @@ mod tests {
                 full_every: 7,
                 keep_fulls: 7,
             })),
+            rate_limit_rpm,
         };
         (
             Harness {
@@ -1298,28 +1310,91 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rate_limit_sheds_over_budget() {
+        // Burst of 3/min per IP; the test peer is unspecified (shared bucket).
+        let (h, _dir) = harness_rpm(3);
+        let mut statuses = Vec::new();
+        for _ in 0..6 {
+            let req = Request::builder()
+                .method("GET")
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap();
+            let resp = h.app.clone().oneshot(req).await.unwrap();
+            statuses.push(resp.status());
+        }
+        assert_eq!(
+            statuses[0],
+            StatusCode::OK,
+            "first request is within budget"
+        );
+        assert!(
+            statuses.contains(&StatusCode::TOO_MANY_REQUESTS),
+            "a flood past the budget must yield 429s, got {statuses:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn no_rate_limit_by_default() {
+        // rpm = 0 (default) → no shedding even under a burst.
+        let (h, _dir) = harness();
+        for _ in 0..20 {
+            let req = Request::builder()
+                .method("GET")
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap();
+            let resp = h.app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn backup_list_restore_and_schedule() {
         let (h, _dir) = harness();
 
         // Domain that exists at backup time.
-        let (status, dom) =
-            call(&h.app, "POST", "/v1/domains", &h.token, json!({"name":"docs"})).await;
+        let (status, dom) = call(
+            &h.app,
+            "POST",
+            "/v1/domains",
+            &h.token,
+            json!({"name":"docs"}),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         let _ = dom["id"].as_u64().unwrap();
 
         // Full backup.
-        let (status, rec) =
-            call(&h.app, "POST", "/v1/backups", &h.token, json!({"kind":"full"})).await;
+        let (status, rec) = call(
+            &h.app,
+            "POST",
+            "/v1/backups",
+            &h.token,
+            json!({"kind":"full"}),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         let backup_id = rec["id"].as_str().unwrap().to_string();
 
         // The catalog lists it.
         let (status, list) = call(&h.app, "GET", "/v1/backups", &h.token, json!({})).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(list.as_array().unwrap().iter().any(|r| r["id"] == backup_id));
+        assert!(list
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["id"] == backup_id));
 
         // Create a SECOND domain AFTER the backup.
-        let _ = call(&h.app, "POST", "/v1/domains", &h.token, json!({"name":"after"})).await;
+        let _ = call(
+            &h.app,
+            "POST",
+            "/v1/domains",
+            &h.token,
+            json!({"name":"after"}),
+        )
+        .await;
         let (_s, before) = call(&h.app, "GET", "/v1/domains", &h.token, json!({})).await;
         assert_eq!(before.as_array().unwrap().len(), 2);
 

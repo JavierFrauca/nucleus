@@ -9,9 +9,9 @@ proceso**.
 
 > **Cambio de rumbo (2026-06):** el foco de Nucleus es ahora el **modo embebido** —
 > una base de datos vectorial *ad-hoc* que tu app referencia como **DLL nativa**
-> (`nucleus.dll` / `.so` / `.dylib`), sin red, sin sidecar, sin servicio que
-> desplegar: «SQLite, pero para RAG con embeddings dentro». El servidor HTTP sigue
-> existiendo como **segundo modo** para despliegues cliente-servidor.
+> (`nucleus.dll`, **Windows x64**), sin red, sin sidecar, sin servicio que desplegar:
+> «SQLite, pero para RAG con embeddings dentro». El servidor HTTP sigue existiendo como
+> **segundo modo** para despliegues cliente-servidor.
 
 ## Dos modos, un mismo motor
 
@@ -38,7 +38,7 @@ lenguaje de consulta para filtros ricos.
 El bundle del **modo embebido** (Windows x64) está disponible en
 [**Releases**](https://github.com/JavierFrauca/nucleus/releases/latest):
 
-- **[nucleus-dll-0.1.1-windows-x64.zip](https://github.com/JavierFrauca/nucleus/releases/download/v0.1.1/nucleus-dll-0.1.1-windows-x64.zip)** (~9 MB) — `nucleus.dll` autocontenida + import lib + header C [`nucleus.h`](crates/ffi/include/nucleus.h) + binding C# tipado + README.
+- **[nucleus-dll-0.1.2-windows-x64.zip](https://github.com/JavierFrauca/nucleus/releases/download/v0.1.2/nucleus-dll-0.1.2-windows-x64.zip)** (~11 MB) — `nucleus.dll` autocontenida + import lib + header C [`nucleus.h`](crates/ffi/include/nucleus.h) + binding C# tipado + README.
 
 Suelta `nucleus.dll` junto a tu ejecutable y referencia el binding C# (o usa el C ABI
 desde C/C++). En Windows la DLL es autocontenida (ONNX Runtime enlazado estático); la
@@ -63,6 +63,7 @@ Guías detalladas en [`docs/`](docs/):
 - [Arquitectura](docs/arquitectura.md) — crates, módulos, flujos y decisiones.
 - [Dossier técnico](docs/dossier-tecnico.md) — guía completa de defensa: decisiones, alternativas, límites y preguntas difíciles.
 - [Resumen de defensa](docs/resumen-defensa.md) — one-pager para imprimir · [diagrama](docs/arquitectura.svg).
+- [Camino a la 1.0](docs/camino-a-1.0.md) — checklist priorizada de lo que falta para estable/production-ready.
 
 ## Clientes / SDKs
 
@@ -110,8 +111,8 @@ demo headless de Node, y un mini-front de navegador con 2 pantallas (ingesta y b
 ## Modo embebido (DLL)
 
 El modo **prioritario**: Nucleus dentro de tu proceso, sin HTTP. Tu app enlaza
-`nucleus.dll` (en Windows; `libnucleus.so`/`.dylib` en otros) y llama al motor
-directamente. En Windows la DLL es **autocontenida** (~28 MB): `ort`/ONNX Runtime se
+`nucleus.dll` y llama al motor directamente. **Se distribuye solo para Windows x64**
+(otras plataformas, más adelante). En Windows la DLL es **autocontenida** (~28 MB): `ort`/ONNX Runtime se
 enlaza **estáticamente**, así que no hay que repartir `onnxruntime.dll`. Lo único que
 se descarga la primera vez es el modelo de embeddings (~450 MB).
 
@@ -153,7 +154,7 @@ foreach (SearchHit hit in engine.Search(domain.Id, "cómo terminar un contrato a
 `/nucleus/nucleus.redb` (otros). El directorio se crea solo.
 
 **Empaquetado**: `packaging/build-dll.ps1 -Version X` produce
-`dist/nucleus-dll-X-windows-x64.zip` (~9 MB) con `nucleus.dll`, la import lib, el
+`dist/nucleus-dll-X-windows-x64.zip` (~11 MB) con `nucleus.dll`, la import lib, el
 header C, el binding C# y un README. Ejemplo end-to-end ejecutable en
 [`examples/ffi-smoke`](examples/ffi-smoke).
 
@@ -190,10 +191,14 @@ crates/
   ```
 - El perfil `dev` usa `debug = 0` (ver `Cargo.toml`) para reducir el tamaño de
   `target/`: el grafo de dependencias (ONNX, tokenizers, códecs de imagen) es grande.
+- **Build sin salida directa a internet** (proxy con inspección TLS): `ort` descarga
+  ONNX Runtime al compilar. Si la descarga falla con `UnknownIssuer`, baja el `.tgz`
+  de ONNX Runtime aparte, descomprímelo y apunta `ORT_LIB_LOCATION` a la carpeta que
+  contiene `lib/onnxruntime.lib` antes de compilar.
 
 ```bash
 cargo build            # workspace
-cargo test --workspace # 37 tests (core + e2e HTTP con MockEmbedder)
+cargo test --workspace # 85 tests (core, integración del motor, C-ABI del FFI y e2e HTTP)
 cargo clippy --workspace --all-targets
 cargo build --features gpu  # opcional: inferencia por GPU (ONNX DirectML)
 
@@ -219,6 +224,7 @@ Variables de entorno (con sus valores por defecto):
 | `NUCLEUS_INDEX`        | `flat`               | Backend de índice: `flat` (exacto) o `hnsw` |
 | `NUCLEUS_INDEX_DIR`    | `<dir BD>/nucleus_indexes` | Dónde se vuelca/carga el grafo HNSW |
 | `NUCLEUS_GPU`          | `false`              | `true` para inferencia en GPU (requiere build `--features gpu`) |
+| `NUCLEUS_RATE_LIMIT_RPM` | `0` (desactivado)  | Peticiones/min por IP (token-bucket); `0` lo desactiva |
 
 Al primer arranque, si no hay tokens, se imprime **una sola vez** un token admin:
 
@@ -407,8 +413,9 @@ opcional, transacción única por documento en la ingesta, cola de jobs con set 
 pendientes + purga de terminados, locks sin envenenamiento (`parking_lot`), versionado de
 esquema con gate de migración, deduplicación por hash de contenido, cotas de entrada,
 apagado ordenado (Ctrl-C/SIGTERM) con volcado de índices, `/healthz` + `/readyz` +
-`/metrics`, token admin a fichero (no a logs), CORS opt-in, listados paginados,
-Dockerfile y CI.
+`/metrics`, token admin a fichero (no a logs), CORS opt-in, **rate limiting** por IP,
+listados paginados, Dockerfile y CI. El **borde C-ABI del FFI** (modo embebido) tiene
+tests propios de su contrato (códigos de estado, JSON in/out, last-error, punteros).
 
 ## Próximos pasos
 
