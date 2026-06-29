@@ -422,11 +422,15 @@ impl Engine {
             let mut map = self.indexes.write();
             for d in &domains {
                 // Try a persisted HNSW dump first; otherwise (re)build from storage.
+                // Encrypted stores never persist the dump (it would leak plaintext
+                // vectors), so always rebuild from the encrypted store in that case.
                 let loaded = match (&self.index_dir, self.index_kind) {
-                    (Some(dir), IndexKind::Hnsw) => HnswIndex::load(dir, &d.id.to_string())
-                        .ok()
-                        .filter(|ix| ix.dim() == d.dim)
-                        .map(|ix| Box::new(ix) as Box<dyn VectorIndex>),
+                    (Some(dir), IndexKind::Hnsw) if !self.storage.is_encrypted() => {
+                        HnswIndex::load(dir, &d.id.to_string())
+                            .ok()
+                            .filter(|ix| ix.dim() == d.dim)
+                            .map(|ix| Box::new(ix) as Box<dyn VectorIndex>)
+                    }
                     _ => None,
                 };
                 let ix = match loaded {
@@ -459,10 +463,18 @@ impl Engine {
     /// Dump every persistable (HNSW) index to `index_dir`. Returns how many were
     /// written. A no-op (returns 0) when persistence is disabled or the backend
     /// is exact (which rebuilds from storage instead).
+    ///
+    /// Also a no-op when the store is **encrypted**: the HNSW dump is written by
+    /// `hnsw_rs` in its own format, so persisting it would leave embedding vectors
+    /// on disk in the clear. With encryption on we rebuild the index from the
+    /// encrypted store on startup instead (see [`load_all_indexes`]).
     pub fn persist_indexes(&self) -> Result<usize> {
         let Some(dir) = &self.index_dir else {
             return Ok(0);
         };
+        if self.storage.is_encrypted() {
+            return Ok(0);
+        }
         let indexes = self.indexes.read();
         let mut written = 0;
         for (domain_id, ix) in indexes.iter() {
@@ -471,6 +483,34 @@ impl Engine {
             }
         }
         Ok(written)
+    }
+
+    /// Write a **consistent, point-in-time snapshot** of the database to `dst` (a
+    /// fresh redb file). Safe to call while the engine is in use: it reads from an
+    /// MVCC snapshot, so concurrent writes are neither blocked nor included past
+    /// the snapshot point.
+    ///
+    /// Encryption carries over unchanged — the snapshot is encrypted with the same
+    /// key and reopens with the same passphrase (or machine key from the same
+    /// directory). Vector indexes are **not** copied; they rebuild from the store
+    /// on open, so the snapshot is storage-only and cheap. Restore by opening the
+    /// snapshot file as a database (or swapping it in for the live one).
+    pub fn backup_to(&self, dst: impl AsRef<std::path::Path>) -> Result<()> {
+        self.storage.backup_to(dst)
+    }
+
+    /// **Rotate the encryption key**: write a copy of the database at `dst`
+    /// re-encrypted under a new key (`new_passphrase`, or the machine key at
+    /// `new_keyfile` when `None`). Swap `dst` in for the live database afterwards.
+    /// See [`Storage::rekey_to`](crate::storage::Storage::rekey_to) for the dedup
+    /// caveat.
+    pub fn rekey_to(
+        &self,
+        dst: impl AsRef<std::path::Path>,
+        new_passphrase: Option<&str>,
+        new_keyfile: Option<&std::path::Path>,
+    ) -> Result<()> {
+        self.storage.rekey_to(dst, new_passphrase, new_keyfile)
     }
 
     // --- domains & tags ----------------------------------------------------
@@ -1248,7 +1288,7 @@ mod tests {
 
     fn engine() -> (Engine, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Storage::open(dir.path().join("n.redb")).unwrap();
+        let storage = Storage::open_ephemeral(dir.path().join("n.redb")).unwrap();
         let embedder = Arc::new(MockEmbedder::new(64));
         (Engine::new(storage, embedder).unwrap(), dir)
     }
@@ -1839,7 +1879,7 @@ mod tests {
     #[test]
     fn query_cache_skips_repeated_embedding() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Storage::open(dir.path().join("n.redb")).unwrap();
+        let storage = Storage::open_ephemeral(dir.path().join("n.redb")).unwrap();
         let emb = Arc::new(CountingEmbedder {
             inner: MockEmbedder::new(64),
             queries: std::sync::atomic::AtomicUsize::new(0),
@@ -1942,7 +1982,7 @@ mod tests {
     #[test]
     fn search_with_scalar_quantized_backend() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Storage::open(dir.path().join("n.redb")).unwrap();
+        let storage = Storage::open_ephemeral(dir.path().join("n.redb")).unwrap();
         let e = Engine::with_index_kind(
             storage,
             Arc::new(MockEmbedder::new(64)),
@@ -1981,7 +2021,7 @@ mod tests {
     #[test]
     fn search_with_hnsw_backend() {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Storage::open(dir.path().join("n.redb")).unwrap();
+        let storage = Storage::open_ephemeral(dir.path().join("n.redb")).unwrap();
         let e = Engine::with_index_kind(
             storage,
             Arc::new(MockEmbedder::new(64)),
@@ -2019,14 +2059,14 @@ mod tests {
     }
 
     #[test]
-    fn hnsw_index_persists_across_reopen() {
+    fn hnsw_index_rebuilds_across_reopen() {
         use crate::index::IndexKind;
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("n.redb");
         let idx_dir = dir.path().join("idx");
         let dom_id;
         {
-            let storage = Storage::open(&db).unwrap();
+            let storage = Storage::open_ephemeral(&db).unwrap();
             let e = Engine::open(
                 storage,
                 Arc::new(MockEmbedder::new(64)),
@@ -2045,10 +2085,13 @@ mod tests {
                 IngestBody::Chunks(vec!["contrato laboral".into()]),
             )
             .unwrap();
-            assert_eq!(e.persist_indexes().unwrap(), 1);
+            // Encryption is mandatory, so the HNSW graph is never dumped to disk in
+            // the clear: persisting is a no-op and the index rebuilds on reopen.
+            assert_eq!(e.persist_indexes().unwrap(), 0);
         }
-        // Reopen with the same index dir: the HNSW graph is loaded from disk.
-        let storage = Storage::open(&db).unwrap();
+        // Reopen with the same index dir: the HNSW graph is rebuilt from the
+        // (encrypted) store, and search still works.
+        let storage = Storage::open_ephemeral(&db).unwrap();
         let e = Engine::open(
             storage,
             Arc::new(MockEmbedder::new(64)),
@@ -2080,7 +2123,7 @@ mod tests {
         let path = dir.path().join("n.redb");
         let dom_id;
         {
-            let storage = Storage::open(&path).unwrap();
+            let storage = Storage::open_ephemeral(&path).unwrap();
             let e = Engine::new(storage, Arc::new(MockEmbedder::new(64))).unwrap();
             let dom = e.create_domain("docs", None).unwrap();
             dom_id = dom.id;
@@ -2095,7 +2138,7 @@ mod tests {
             .unwrap();
         }
         // Reopen: the index must be rebuilt from storage.
-        let storage = Storage::open(&path).unwrap();
+        let storage = Storage::open_ephemeral(&path).unwrap();
         let e = Engine::new(storage, Arc::new(MockEmbedder::new(64))).unwrap();
         let hits = e
             .search(

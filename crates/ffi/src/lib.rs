@@ -140,6 +140,19 @@ struct OpenConfig {
     /// Run embeddings on the GPU (requires the crate's `gpu` feature + a driver).
     #[serde(default)]
     gpu: bool,
+    /// Optional passphrase for **encryption at rest** (always on). With a
+    /// passphrase the key is derived via Argon2id (portable: the same phrase
+    /// reopens the DB anywhere). Omitted/empty, a per-machine key is used
+    /// automatically. A legacy unencrypted database is migrated transparently on
+    /// first open.
+    #[serde(default)]
+    passphrase: Option<String>,
+    /// Optional path to the machine **key file** (used only without a passphrase).
+    /// Defaults to `NUCLEUS_KEYFILE`, else an OS per-user config dir — **kept out of
+    /// the database directory** so a data backup never carries the key. Back the key
+    /// up yourself, separately.
+    #[serde(default)]
+    keyfile: Option<String>,
 }
 
 /// Per-user default database path used when `db_path` is omitted. Embedded in a
@@ -240,7 +253,13 @@ pub unsafe extern "C" fn nucleus_open(
         }
     }
 
-    let storage = match Storage::open(&db_path) {
+    let passphrase = cfg.passphrase.as_deref().filter(|s| !s.is_empty());
+    let keyfile = cfg
+        .keyfile
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
+    let storage = match Storage::open_with_options(&db_path, passphrase, keyfile.as_deref()) {
         Ok(s) => s,
         Err(e) => {
             return fail(
@@ -683,6 +702,119 @@ pub unsafe extern "C" fn nucleus_persist_indexes(
     };
     match eng.persist_indexes() {
         Ok(n) => ok_json(out_json, json!({ "persisted": n })),
+        Err(e) => fail(out_json, NUCLEUS_ERR_ENGINE, e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+struct BackupInput {
+    /// Destination file for the snapshot (created/overwritten). Its directory is
+    /// created if missing.
+    dest_path: String,
+}
+
+/// Write a consistent snapshot of the database to a file. Input:
+/// `{"dest_path":"backups/nucleus-2026.redb"}`. Output:
+/// `{"backed_up":true,"path":"..."}`.
+///
+/// The snapshot is a self-contained redb file, **encrypted with the same key** as
+/// the live database (it reopens with the same passphrase, or the machine key from
+/// the same directory). Safe to call while the engine is in use.
+///
+/// # Safety
+/// See module docs.
+#[no_mangle]
+pub unsafe extern "C" fn nucleus_backup(
+    handle: *mut Engine,
+    input_json: *const c_char,
+    out_json: *mut *mut c_char,
+) -> i32 {
+    let Some(eng) = engine(handle) else {
+        return fail(
+            out_json,
+            NUCLEUS_ERR_NULL_ARG,
+            "engine handle is null".into(),
+        );
+    };
+    let input: BackupInput = match parse(input_json) {
+        Ok(v) => v,
+        Err(cm) => return fail(out_json, cm.0, cm.1),
+    };
+    // Make sure the destination directory exists before snapshotting.
+    let dst = PathBuf::from(&input.dest_path);
+    if let Some(parent) = dst.parent().filter(|p| !p.as_os_str().is_empty()) {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            return fail(
+                out_json,
+                NUCLEUS_ERR_ENGINE,
+                format!("create backup dir: {e}"),
+            );
+        }
+    }
+    match eng.backup_to(&dst) {
+        Ok(()) => ok_json(
+            out_json,
+            json!({ "backed_up": true, "path": input.dest_path }),
+        ),
+        Err(e) => fail(out_json, NUCLEUS_ERR_ENGINE, e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+struct RekeyInput {
+    /// Destination file for the rotated database (created/overwritten).
+    dest_path: String,
+    /// New passphrase. Omitted/empty → use a machine key at `keyfile` (or default).
+    #[serde(default)]
+    passphrase: Option<String>,
+    /// New machine key file (only when no passphrase). Default per `nucleus_open`.
+    #[serde(default)]
+    keyfile: Option<String>,
+}
+
+/// **Rotate the encryption key.** Writes a copy of the database re-encrypted under
+/// a new key. Input: `{"dest_path":"...","passphrase":"...","keyfile":"..."}`
+/// (passphrase/keyfile optional). Output: `{"rekeyed":true,"path":"..."}`.
+/// Activate the result by closing the engine and reopening on `dest_path` with the
+/// new key (or swapping it in for the live file). The dedup index resets — see the
+/// engine docs.
+///
+/// # Safety
+/// See module docs.
+#[no_mangle]
+pub unsafe extern "C" fn nucleus_rekey(
+    handle: *mut Engine,
+    input_json: *const c_char,
+    out_json: *mut *mut c_char,
+) -> i32 {
+    let Some(eng) = engine(handle) else {
+        return fail(
+            out_json,
+            NUCLEUS_ERR_NULL_ARG,
+            "engine handle is null".into(),
+        );
+    };
+    let input: RekeyInput = match parse(input_json) {
+        Ok(v) => v,
+        Err(cm) => return fail(out_json, cm.0, cm.1),
+    };
+    let dst = PathBuf::from(&input.dest_path);
+    if let Some(parent) = dst.parent().filter(|p| !p.as_os_str().is_empty()) {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            return fail(out_json, NUCLEUS_ERR_ENGINE, format!("create dir: {e}"));
+        }
+    }
+    let passphrase = input.passphrase.as_deref().filter(|s| !s.is_empty());
+    let keyfile = input
+        .keyfile
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
+    match eng.rekey_to(&dst, passphrase, keyfile.as_deref()) {
+        Ok(()) => ok_json(
+            out_json,
+            json!({ "rekeyed": true, "path": input.dest_path }),
+        ),
         Err(e) => fail(out_json, NUCLEUS_ERR_ENGINE, e.to_string()),
     }
 }
@@ -1306,8 +1438,16 @@ mod tests {
     fn open_engine() -> (*mut Engine, TempDir) {
         let dir = TempDir::new().unwrap();
         let db = dir.path().join("t.redb");
+        // Keep the machine key file inside the tempdir so tests stay hermetic and
+        // never touch the real per-user key location.
+        let key = dir.path().join("t.key");
         let cfg = CString::new(
-            json!({ "db_path": db.to_string_lossy(), "index_kind": "flat" }).to_string(),
+            json!({
+                "db_path": db.to_string_lossy(),
+                "keyfile": key.to_string_lossy(),
+                "index_kind": "flat",
+            })
+            .to_string(),
         )
         .unwrap();
         let mut handle: *mut Engine = ptr::null_mut();
@@ -1439,6 +1579,99 @@ mod tests {
         let v: Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v["domains"].as_array().unwrap().len(), 2);
         unsafe { nucleus_close(handle) };
+    }
+
+    // --- backup -----------------------------------------------------------
+
+    #[test]
+    fn backup_creates_reopenable_snapshot() {
+        let (handle, dir) = open_engine();
+        let (code, _) = unsafe { call(nucleus_create_domain, handle, r#"{"name":"legal"}"#) };
+        assert_eq!(code, NUCLEUS_OK);
+
+        // Snapshot to a separate subdirectory (created on demand). The key lives
+        // elsewhere (dir/t.key), so the backup never carries it.
+        let backup = dir.path().join("snapshots").join("backup.redb");
+        let (code, val) = unsafe {
+            call(
+                nucleus_backup,
+                handle,
+                &json!({ "dest_path": backup.to_string_lossy() }).to_string(),
+            )
+        };
+        assert_eq!(code, NUCLEUS_OK, "backup failed: {:?}", last_error_string());
+        assert_eq!(val["backed_up"], true);
+        assert!(backup.exists());
+        unsafe { nucleus_close(handle) };
+
+        // The snapshot is a standalone, encrypted, reopenable database — given the
+        // same (separately-managed) machine key.
+        let cfg = CString::new(
+            json!({
+                "db_path": backup.to_string_lossy(),
+                "keyfile": dir.path().join("t.key").to_string_lossy(),
+                "index_kind": "flat",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut h2: *mut Engine = ptr::null_mut();
+        let code = unsafe { nucleus_open(cfg.as_ptr(), &mut h2) };
+        assert_eq!(code, NUCLEUS_OK, "reopen failed: {:?}", last_error_string());
+        let mut out: *mut c_char = ptr::null_mut();
+        let code = unsafe { nucleus_list_domains(h2, &mut out) };
+        assert_eq!(code, NUCLEUS_OK);
+        let s = unsafe { CStr::from_ptr(out).to_str().unwrap().to_owned() };
+        unsafe { nucleus_string_free(out) };
+        let v: Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["domains"].as_array().unwrap().len(), 1);
+        assert_eq!(v["domains"][0]["name"], "legal");
+        unsafe { nucleus_close(h2) };
+    }
+
+    #[test]
+    fn backup_rejects_null_handle() {
+        let (code, _) =
+            unsafe { call(nucleus_backup, ptr::null_mut(), r#"{"dest_path":"x.redb"}"#) };
+        assert_eq!(code, NUCLEUS_ERR_NULL_ARG);
+    }
+
+    #[test]
+    fn rekey_rotates_to_passphrase() {
+        let (handle, dir) = open_engine(); // machine-key DB
+        let (code, _) = unsafe { call(nucleus_create_domain, handle, r#"{"name":"legal"}"#) };
+        assert_eq!(code, NUCLEUS_OK);
+
+        // Rotate to a passphrase-protected copy.
+        let dst = dir.path().join("rotated.redb");
+        let (code, val) = unsafe {
+            call(
+                nucleus_rekey,
+                handle,
+                &json!({ "dest_path": dst.to_string_lossy(), "passphrase": "rk-pass" }).to_string(),
+            )
+        };
+        assert_eq!(code, NUCLEUS_OK, "rekey failed: {:?}", last_error_string());
+        assert_eq!(val["rekeyed"], true);
+        unsafe { nucleus_close(handle) };
+
+        // The rotated DB opens with the NEW passphrase and keeps the data.
+        let cfg = CString::new(
+            json!({ "db_path": dst.to_string_lossy(), "passphrase": "rk-pass", "index_kind": "flat" })
+                .to_string(),
+        )
+        .unwrap();
+        let mut h2: *mut Engine = ptr::null_mut();
+        let code = unsafe { nucleus_open(cfg.as_ptr(), &mut h2) };
+        assert_eq!(code, NUCLEUS_OK, "reopen failed: {:?}", last_error_string());
+        let mut out: *mut c_char = ptr::null_mut();
+        let code = unsafe { nucleus_list_domains(h2, &mut out) };
+        assert_eq!(code, NUCLEUS_OK);
+        let s = unsafe { CStr::from_ptr(out).to_str().unwrap().to_owned() };
+        unsafe { nucleus_string_free(out) };
+        let v: Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["domains"][0]["name"], "legal");
+        unsafe { nucleus_close(h2) };
     }
 
     // --- error reporting & memory hygiene --------------------------------

@@ -231,7 +231,8 @@ mod tests {
     use std::sync::Arc;
 
     fn engine_at(path: &Path) -> Engine {
-        let storage = Storage::open(path).unwrap();
+        // Per-tempdir key (shared across restore targets in the same dir), hermetic.
+        let storage = Storage::open_ephemeral(path).unwrap();
         Engine::new(storage, Arc::new(MockEmbedder::new(32))).unwrap()
     }
 

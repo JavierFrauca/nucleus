@@ -17,6 +17,7 @@ use redb::{
 };
 
 use crate::auth::{ApiToken, Scope};
+use crate::crypto::{Cipher, KdfParams};
 use crate::error::NucleusError;
 use crate::id::{ChunkId, DocumentId, DomainId, JobId, SubdomainId, TagId, TokenId};
 use crate::jobs::{Job, JobKind, JobStatus};
@@ -40,9 +41,22 @@ const JOBS_PENDING: TableDefinition<u64, ()> = TableDefinition::new("jobs_pendin
 const SEQ: TableDefinition<&str, u64> = TableDefinition::new("seq");
 // engine metadata (e.g. schema_version) for migrations.
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
+// Crypto bootstrap header, always stored **in the clear** (it is what lets us
+// derive/verify the key): "salt", "kdf" (Argon2id params) and "verifier" (an
+// encrypted magic constant used to detect a wrong passphrase up front). Absent
+// on an unencrypted database.
+const CRYPTO: TableDefinition<&str, &[u8]> = TableDefinition::new("crypto");
 
 /// On-disk schema version. Bump when the layout changes and add a migration.
-const SCHEMA_VERSION: u64 = 1;
+const SCHEMA_VERSION: u64 = 2;
+
+/// Plaintext probed through the crypto `verifier` to detect a wrong key.
+const CRYPTO_MAGIC: &[u8] = b"nucleus-crypto-v1";
+
+/// Crypto header `mode`: key derived from a user passphrase (Argon2id).
+const MODE_PASSPHRASE: &[u8] = b"passphrase";
+/// Crypto header `mode`: random key kept in an OS-protected key file.
+const MODE_MACHINE: &[u8] = b"machine";
 
 // Secondary indexes (multimap): parent id -> child id.
 const DOCS_BY_DOMAIN: MultimapTableDefinition<u64, u64> =
@@ -75,6 +89,9 @@ const DOCS_BY_HASH: TableDefinition<&str, u64> = TableDefinition::new("docs_by_h
 pub struct Storage {
     db: Database,
     path: PathBuf,
+    /// When set, every entity value is transparently encrypted/decrypted with
+    /// this AEAD cipher. `None` means the database is stored in the clear.
+    cipher: Option<Cipher>,
 }
 
 /// A chunk to persist in a batch: its text and its embedding vector.
@@ -84,14 +101,577 @@ pub struct NewChunk<'a> {
 }
 
 impl Storage {
-    /// Open (creating if needed) the database at `path`.
+    /// Open (creating if needed) the database at `path`. **Encryption at rest is
+    /// always on** — there is no unencrypted mode. With no passphrase the key is a
+    /// random machine key kept in an OS-protected key file at a location **separate
+    /// from the database** (see [`open_with_options`](Self::open_with_options)).
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with_options(path, None, None)
+    }
+
+    /// Open the database keyed by `passphrase` (or the machine key when `None`),
+    /// with the machine key file at its default location.
+    pub fn open_with_passphrase(path: impl AsRef<Path>, passphrase: Option<&str>) -> Result<Self> {
+        Self::open_with_options(path, passphrase, None)
+    }
+
+    /// Open (creating if needed) the database at `path`, always encrypted at rest
+    /// (XChaCha20-Poly1305 over every value).
+    ///
+    /// The key is resolved as:
+    /// - **`Some(passphrase)`** → derived with Argon2id (portable, recoverable: the
+    ///   same passphrase reopens the DB on any machine). `keyfile` is ignored.
+    /// - **`None`** → a random **machine key** read from `keyfile`, or, when that is
+    ///   `None`, from the default location: `NUCLEUS_KEYFILE`, else an OS per-user
+    ///   config dir (`%APPDATA%\Nucleus\nucleus.key` / `~/.config/nucleus/...`). The
+    ///   key file is **deliberately kept out of the database directory** so a backup
+    ///   of the data never carries the key — back the key up yourself, separately.
+    ///   It is OS-protected (DPAPI on Windows, `0600` elsewhere) and, if lost, the
+    ///   data is unrecoverable (use a passphrase for recoverable protection).
+    ///
+    /// Behaviour by case:
+    /// - **fresh DB** → encryption is enabled and a crypto header is written.
+    /// - **existing encrypted DB** → the key is verified; a wrong/missing key is
+    ///   refused without exposing data.
+    /// - **legacy *unencrypted* DB with data** → transparently **migrated** in place
+    ///   to an encrypted file on first open (atomic swap, no plaintext left behind).
+    pub fn open_with_options(
+        path: impl AsRef<Path>,
+        passphrase: Option<&str>,
+        keyfile: Option<&Path>,
+    ) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
+        // Transparently upgrade a legacy unencrypted database before opening it.
+        Self::migrate_legacy_if_needed(&path, passphrase, keyfile)?;
         let db = Database::create(&path)?;
-        let storage = Self { db, path };
+        let mut storage = Self {
+            db,
+            path,
+            cipher: None,
+        };
         storage.init_tables()?;
+        storage.init_crypto(passphrase, keyfile)?;
         storage.check_schema_version()?;
         Ok(storage)
+    }
+
+    /// Test-only: open with one machine key file per directory (the test's
+    /// tempdir), shared by every database in it — so a restore to a new file in the
+    /// same dir reuses the key — while staying isolated from other tests and from
+    /// the real per-user key location.
+    #[cfg(test)]
+    pub(crate) fn open_ephemeral(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        let keyfile = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|d| d.join(".nucleus-test.key"))
+            .unwrap_or_else(|| PathBuf::from(".nucleus-test.key"));
+        Self::open_with_options(&path, None, Some(&keyfile))
+    }
+
+    /// Always `true` now that encryption is mandatory. Kept because callers (the
+    /// engine) branch on it to avoid writing derived artefacts — like the HNSW
+    /// graph dump — to disk in the clear; those paths now always rebuild instead.
+    pub fn is_encrypted(&self) -> bool {
+        self.cipher.is_some()
+    }
+
+    /// Encode a value for storage, encrypting it when a cipher is configured.
+    fn enc<T: serde::Serialize>(&self, value: &T) -> Result<Vec<u8>> {
+        let plain = codec::encode(value)?;
+        match &self.cipher {
+            Some(c) => c.seal(&plain),
+            None => Ok(plain),
+        }
+    }
+
+    /// Decode a stored value, decrypting it first when a cipher is configured.
+    fn dec<T: serde::de::DeserializeOwned>(&self, bytes: &[u8]) -> Result<T> {
+        match &self.cipher {
+            Some(c) => codec::decode(&c.open(bytes)?),
+            None => codec::decode(bytes),
+        }
+    }
+
+    /// Opaque, keyed token for a sensitive lookup-key component, so it never lands
+    /// in a redb key in the clear. Deterministic, so exact lookups still work.
+    /// Falls back to the raw text only on the plaintext (migration-source) path,
+    /// which never builds index keys.
+    fn index_token(&self, data: &str) -> String {
+        match &self.cipher {
+            Some(c) => c.index_token(data),
+            None => data.to_string(),
+        }
+    }
+
+    /// Key for the by-name indexes (`TAG_IDS`, `SUBDOMAIN_IDS`, `DOCS_BY_HASH`). The
+    /// domain id stays in clear (not secret, and lets cascade-delete prefix-scan by
+    /// domain), while the **name/hash is keyed-hashed** so it never appears on disk.
+    fn name_key(&self, domain_id: DomainId, name: &str) -> String {
+        format!("{}\u{1f}{}", domain_id.get(), self.index_token(name))
+    }
+
+    /// Key for the metadata index (`CHUNKS_BY_META`). Both the metadata key and
+    /// value are sensitive, so the whole `"key\u{1f}value"` pair is keyed-hashed.
+    fn meta_key(&self, key: &str, value: &str) -> String {
+        self.index_token(&format!("{key}\u{1f}{value}"))
+    }
+
+    /// Open the database **without** wiring up encryption (cipher stays `None`, so
+    /// values are read/written as raw bincode). Used to inspect or read a legacy
+    /// plaintext database during migration; not exposed.
+    fn open_plaintext(path: &Path) -> Result<Self> {
+        let db = Database::create(path)?;
+        let storage = Self {
+            db,
+            path: path.to_path_buf(),
+            cipher: None,
+        };
+        storage.init_tables()?;
+        Ok(storage)
+    }
+
+    /// If `path` is a legacy *unencrypted* database that already holds data, rewrite
+    /// it as an encrypted database and swap it in place. The original file is left
+    /// untouched until a final atomic rename, so a crash mid-migration never loses
+    /// data nor leaves a half-written file. No-op for a fresh, empty, or
+    /// already-encrypted database.
+    fn migrate_legacy_if_needed(
+        path: &Path,
+        passphrase: Option<&str>,
+        keyfile: Option<&Path>,
+    ) -> Result<()> {
+        if !path.exists() {
+            return Ok(());
+        }
+        let (has_data, has_header) = {
+            let s = Self::open_plaintext(path)?;
+            let rtx = s.db.begin_read()?;
+            let has_header = rtx.open_table(CRYPTO)?.get("mode")?.is_some();
+            let has_data = rtx.open_table(SEQ)?.len()? > 0;
+            (has_data, has_header)
+        };
+        if has_header || !has_data {
+            return Ok(());
+        }
+        // Legacy plaintext DB with data → encrypt it.
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("nucleus.redb");
+        let tmp = path.with_file_name(format!("{file_name}.encrypting"));
+        if tmp.exists() {
+            std::fs::remove_file(&tmp)?;
+        }
+        {
+            let src = Self::open_plaintext(path)?;
+            let (cipher, header) = resolve_new_cipher(passphrase, keyfile)?;
+            src.write_encrypted_copy(&tmp, &cipher, &header)?;
+        }
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
+    /// Write an **encrypted copy** of this (plaintext) database to `dst`: entity
+    /// values are sealed, id/index tables are copied verbatim, and a fresh crypto
+    /// header is written. `self` must be a plaintext store.
+    fn write_encrypted_copy(
+        &self,
+        dst: &Path,
+        cipher: &Cipher,
+        header: &CryptoHeader,
+    ) -> Result<()> {
+        if self.is_encrypted() {
+            return Err(NucleusError::crypto(
+                "internal: encrypted-copy source must be a plaintext database",
+            ));
+        }
+        if dst.exists() {
+            std::fs::remove_file(dst)?;
+        }
+        let src = self.db.begin_read()?;
+        let out = Database::create(dst)?;
+        let wtx = out.begin_write()?;
+        {
+            // Entity tables: re-seal each value (source values are plaintext bincode).
+            macro_rules! seal_table {
+                ($def:expr) => {{
+                    let s = src.open_table($def)?;
+                    let mut d = wtx.open_table($def)?;
+                    for entry in s.iter()? {
+                        let (k, v) = entry?;
+                        d.insert(k.value(), cipher.seal(v.value())?.as_slice())?;
+                    }
+                }};
+            }
+            // Id/counter/key tables: values are not secret — copy verbatim.
+            macro_rules! copy_table {
+                ($def:expr) => {{
+                    let s = src.open_table($def)?;
+                    let mut d = wtx.open_table($def)?;
+                    for entry in s.iter()? {
+                        let (k, v) = entry?;
+                        d.insert(k.value(), v.value())?;
+                    }
+                }};
+            }
+            macro_rules! copy_multimap {
+                ($def:expr) => {{
+                    let s = src.open_multimap_table($def)?;
+                    let mut d = wtx.open_multimap_table($def)?;
+                    for entry in s.iter()? {
+                        let (k, vals) = entry?;
+                        for v in vals {
+                            d.insert(k.value(), v?.value())?;
+                        }
+                    }
+                }};
+            }
+            // By-name/by-hash index: keep the cleartext "{domain}\u{1f}" prefix,
+            // keyed-hash the secret part. Written hashed so the destination file
+            // never contains the plaintext key (not even in freed pages).
+            macro_rules! seal_named_index {
+                ($def:expr) => {{
+                    let s = src.open_table($def)?;
+                    let mut d = wtx.open_table($def)?;
+                    for entry in s.iter()? {
+                        let (k, v) = entry?;
+                        let key = k.value();
+                        let nk = match key.split_once('\u{1f}') {
+                            Some((dom, secret)) => {
+                                format!("{dom}\u{1f}{}", cipher.index_token(secret))
+                            }
+                            None => key.to_string(),
+                        };
+                        d.insert(nk.as_str(), v.value())?;
+                    }
+                }};
+            }
+
+            seal_table!(DOMAINS);
+            seal_table!(DOCUMENTS);
+            seal_table!(CHUNKS);
+            seal_table!(EMBEDDINGS);
+            seal_table!(TAGS);
+            seal_table!(TOKENS);
+            seal_table!(JOBS);
+            seal_table!(SUBDOMAINS);
+
+            copy_table!(JOBS_PENDING);
+            copy_table!(SEQ);
+            copy_table!(META);
+            // Sensitive index keys are written **already keyed-hashed**, so the new
+            // encrypted file is born at the current schema (no plaintext residue).
+            seal_named_index!(SUBDOMAIN_IDS);
+            seal_named_index!(TAG_IDS);
+            seal_named_index!(DOCS_BY_HASH);
+            {
+                let mut m = wtx.open_table(META)?;
+                m.insert("schema_version", SCHEMA_VERSION)?;
+            }
+
+            // Fresh crypto header for the destination (never copy the source's).
+            {
+                let mut c = wtx.open_table(CRYPTO)?;
+                c.insert("mode", header.mode)?;
+                if let Some(salt) = &header.salt {
+                    c.insert("salt", salt.as_slice())?;
+                }
+                if let Some(kdf) = &header.kdf {
+                    c.insert("kdf", kdf.as_slice())?;
+                }
+                c.insert("verifier", header.verifier.as_slice())?;
+            }
+
+            copy_multimap!(DOCS_BY_DOMAIN);
+            copy_multimap!(CHUNKS_BY_DOMAIN);
+            copy_multimap!(CHUNKS_BY_DOC);
+            copy_multimap!(CHUNKS_BY_TAG);
+            copy_multimap!(TAGS_BY_DOMAIN);
+            // Metadata index: keyed-hash the whole "key\u{1f}value" pair on copy.
+            {
+                let s = src.open_multimap_table(CHUNKS_BY_META)?;
+                let mut d = wtx.open_multimap_table(CHUNKS_BY_META)?;
+                for entry in s.iter()? {
+                    let (k, vals) = entry?;
+                    let nk = cipher.index_token(k.value());
+                    for v in vals {
+                        d.insert(nk.as_str(), v?.value())?;
+                    }
+                }
+            }
+            copy_multimap!(SUBDOMAINS_BY_DOMAIN);
+            copy_multimap!(CHUNKS_BY_SUBDOMAIN);
+        }
+        wtx.commit()?;
+        Ok(())
+    }
+
+    /// Produce an **encrypted copy** of this (plaintext) database at `dst`, keyed by
+    /// `passphrase` (or the machine key when `None`). Exposed for explicit, manual
+    /// migrations; the transparent in-place upgrade uses the same machinery.
+    pub fn create_encrypted_copy(
+        &self,
+        dst: impl AsRef<Path>,
+        passphrase: Option<&str>,
+        keyfile: Option<&Path>,
+    ) -> Result<()> {
+        let dst = dst.as_ref();
+        let (cipher, header) = resolve_new_cipher(passphrase, keyfile)?;
+        self.write_encrypted_copy(dst, &cipher, &header)
+    }
+
+    /// Decrypt a stored value to its raw plaintext bytes (no bincode decode). Used
+    /// when re-sealing values under a different key during a rekey.
+    fn open_raw(&self, bytes: &[u8]) -> Result<Vec<u8>> {
+        match &self.cipher {
+            Some(c) => c.open(bytes),
+            None => Ok(bytes.to_vec()),
+        }
+    }
+
+    /// **Rotate the encryption key**: write a copy of this database at `dst`
+    /// re-encrypted under a new key (`new_passphrase`, or the machine key at
+    /// `new_keyfile` when `None`). Every value is decrypted with the current key and
+    /// re-sealed with the new one, and the keyed-hash index keys are rebuilt under
+    /// the new key from the entities. Restore by swapping `dst` in for the live db.
+    ///
+    /// Caveat: the content-hash dedup index is **reset** (its keys can't be
+    /// recomputed without the original hashes, which aren't stored), so re-ingesting
+    /// a document identical to a pre-rekey one may create a duplicate.
+    pub fn rekey_to(
+        &self,
+        dst: impl AsRef<Path>,
+        new_passphrase: Option<&str>,
+        new_keyfile: Option<&Path>,
+    ) -> Result<()> {
+        let dst = dst.as_ref();
+        if dst.exists() {
+            std::fs::remove_file(dst)?;
+        }
+        let (cipher, header) = resolve_new_cipher(new_passphrase, new_keyfile)?;
+        let src = self.db.begin_read()?;
+        let out = Database::create(dst)?;
+        let wtx = out.begin_write()?;
+        {
+            // Entity tables: decrypt with the current key, re-seal with the new one.
+            macro_rules! reseal {
+                ($def:expr) => {{
+                    let s = src.open_table($def)?;
+                    let mut d = wtx.open_table($def)?;
+                    for entry in s.iter()? {
+                        let (k, v) = entry?;
+                        let plain = self.open_raw(v.value())?;
+                        d.insert(k.value(), cipher.seal(&plain)?.as_slice())?;
+                    }
+                }};
+            }
+            macro_rules! copy_table {
+                ($def:expr) => {{
+                    let s = src.open_table($def)?;
+                    let mut d = wtx.open_table($def)?;
+                    for entry in s.iter()? {
+                        let (k, v) = entry?;
+                        d.insert(k.value(), v.value())?;
+                    }
+                }};
+            }
+            macro_rules! copy_multimap {
+                ($def:expr) => {{
+                    let s = src.open_multimap_table($def)?;
+                    let mut d = wtx.open_multimap_table($def)?;
+                    for entry in s.iter()? {
+                        let (k, vals) = entry?;
+                        for v in vals {
+                            d.insert(k.value(), v?.value())?;
+                        }
+                    }
+                }};
+            }
+
+            reseal!(DOMAINS);
+            reseal!(DOCUMENTS);
+            reseal!(CHUNKS);
+            reseal!(EMBEDDINGS);
+            reseal!(TAGS);
+            reseal!(TOKENS);
+            reseal!(JOBS);
+            reseal!(SUBDOMAINS);
+
+            copy_table!(JOBS_PENDING);
+            copy_table!(SEQ);
+            copy_table!(META);
+            {
+                let mut m = wtx.open_table(META)?;
+                m.insert("schema_version", SCHEMA_VERSION)?;
+            }
+
+            // New crypto header for the new key.
+            {
+                let mut c = wtx.open_table(CRYPTO)?;
+                c.insert("mode", header.mode)?;
+                if let Some(salt) = &header.salt {
+                    c.insert("salt", salt.as_slice())?;
+                }
+                if let Some(kdf) = &header.kdf {
+                    c.insert("kdf", kdf.as_slice())?;
+                }
+                c.insert("verifier", header.verifier.as_slice())?;
+            }
+
+            // Rebuild keyed-hash index keys under the NEW key from the entities (the
+            // old hashed keys can't be reversed). DOCS_BY_HASH is left empty.
+            {
+                let tags = src.open_table(TAGS)?;
+                let mut by_name = wtx.open_table(TAG_IDS)?;
+                for entry in tags.iter()? {
+                    let (_, v) = entry?;
+                    let tag: Tag = self.dec(v.value())?;
+                    let key = format!(
+                        "{}\u{1f}{}",
+                        tag.domain_id.get(),
+                        cipher.index_token(&tag.name)
+                    );
+                    by_name.insert(key.as_str(), tag.id.get())?;
+                }
+            }
+            {
+                let subs = src.open_table(SUBDOMAINS)?;
+                let mut by_name = wtx.open_table(SUBDOMAIN_IDS)?;
+                for entry in subs.iter()? {
+                    let (_, v) = entry?;
+                    let sub: Subdomain = self.dec(v.value())?;
+                    let key = format!(
+                        "{}\u{1f}{}",
+                        sub.domain_id.get(),
+                        cipher.index_token(&sub.name)
+                    );
+                    by_name.insert(key.as_str(), sub.id.get())?;
+                }
+            }
+            {
+                let chunks = src.open_table(CHUNKS)?;
+                let mut by_meta = wtx.open_multimap_table(CHUNKS_BY_META)?;
+                for entry in chunks.iter()? {
+                    let (_, v) = entry?;
+                    let chunk: Chunk = self.dec(v.value())?;
+                    for (k, val) in &chunk.metadata {
+                        let mk = cipher.index_token(&format!("{k}\u{1f}{val}"));
+                        by_meta.insert(mk.as_str(), chunk.id.get())?;
+                    }
+                }
+            }
+
+            copy_multimap!(DOCS_BY_DOMAIN);
+            copy_multimap!(CHUNKS_BY_DOMAIN);
+            copy_multimap!(CHUNKS_BY_DOC);
+            copy_multimap!(CHUNKS_BY_TAG);
+            copy_multimap!(TAGS_BY_DOMAIN);
+            copy_multimap!(SUBDOMAINS_BY_DOMAIN);
+            copy_multimap!(CHUNKS_BY_SUBDOMAIN);
+        }
+        wtx.commit()?;
+        Ok(())
+    }
+
+    /// Resolve and verify the cipher from the on-disk crypto header, or enable
+    /// encryption on a fresh database. Always leaves `self.cipher` set on success.
+    fn init_crypto(&mut self, passphrase: Option<&str>, keyfile: Option<&Path>) -> Result<()> {
+        let (mode, salt, kdf, verifier) = {
+            let rtx = self.db.begin_read()?;
+            let t = rtx.open_table(CRYPTO)?;
+            (
+                t.get("mode")?.map(|g| g.value().to_vec()),
+                t.get("salt")?.map(|g| g.value().to_vec()),
+                t.get("kdf")?.map(|g| g.value().to_vec()),
+                t.get("verifier")?.map(|g| g.value().to_vec()),
+            )
+        };
+
+        match mode.as_deref() {
+            Some(m) if m == MODE_PASSPHRASE => {
+                let pass = passphrase.filter(|p| !p.is_empty()).ok_or_else(|| {
+                    NucleusError::crypto(
+                        "database is encrypted with a passphrase; provide it to open",
+                    )
+                })?;
+                let salt = salt.ok_or_else(|| NucleusError::crypto("corrupt crypto header"))?;
+                let kdf = kdf.ok_or_else(|| NucleusError::crypto("corrupt crypto header"))?;
+                let verifier =
+                    verifier.ok_or_else(|| NucleusError::crypto("corrupt crypto header"))?;
+                let cipher = Cipher::from_passphrase(pass, &salt, KdfParams::from_bytes(&kdf)?)?;
+                self.verify_key(
+                    &cipher,
+                    &verifier,
+                    "wrong passphrase for encrypted database",
+                )?;
+                self.cipher = Some(cipher);
+                Ok(())
+            }
+            Some(m) if m == MODE_MACHINE => {
+                let verifier =
+                    verifier.ok_or_else(|| NucleusError::crypto("corrupt crypto header"))?;
+                let key = crate::crypto::load_or_create_machine_key(&resolve_keyfile(keyfile)?)?;
+                let cipher = Cipher::new(&key);
+                self.verify_key(
+                    &cipher,
+                    &verifier,
+                    "machine key does not match this database",
+                )?;
+                self.cipher = Some(cipher);
+                Ok(())
+            }
+            Some(_) => Err(NucleusError::crypto(
+                "unknown encryption mode in crypto header",
+            )),
+            None => {
+                // No header: a fresh DB (enable encryption now). A legacy plaintext
+                // DB with data is handled earlier by migration, so reaching here
+                // with data means migration failed.
+                if self.has_any_data()? {
+                    return Err(NucleusError::crypto(
+                        "unencrypted database with existing data could not be migrated",
+                    ));
+                }
+                let (cipher, header) = resolve_new_cipher(passphrase, keyfile)?;
+                let wtx = self.db.begin_write()?;
+                {
+                    let mut c = wtx.open_table(CRYPTO)?;
+                    c.insert("mode", header.mode)?;
+                    if let Some(salt) = &header.salt {
+                        c.insert("salt", salt.as_slice())?;
+                    }
+                    if let Some(kdf) = &header.kdf {
+                        c.insert("kdf", kdf.as_slice())?;
+                    }
+                    c.insert("verifier", header.verifier.as_slice())?;
+                }
+                wtx.commit()?;
+                self.cipher = Some(cipher);
+                Ok(())
+            }
+        }
+    }
+
+    /// Confirm a cipher matches the database by opening the stored verifier.
+    fn verify_key(&self, cipher: &Cipher, verifier: &[u8], msg: &'static str) -> Result<()> {
+        let probe = cipher
+            .open(verifier)
+            .map_err(|_| NucleusError::crypto(msg))?;
+        if probe != CRYPTO_MAGIC {
+            return Err(NucleusError::crypto("crypto verifier mismatch"));
+        }
+        Ok(())
+    }
+
+    /// Whether any entity has ever been created. Uses the `SEQ` table: every id
+    /// allocation bumps a counter there, so an empty `SEQ` means a pristine
+    /// database.
+    fn has_any_data(&self) -> Result<bool> {
+        let rtx = self.db.begin_read()?;
+        let seq = rtx.open_table(SEQ)?;
+        Ok(seq.len()? > 0)
     }
 
     /// Filesystem path of the database file.
@@ -148,6 +728,9 @@ impl Storage {
             copy_table!(JOBS_PENDING);
             copy_table!(SEQ);
             copy_table!(META);
+            // The crypto header (salt/params/verifier) must travel with the data,
+            // or an encrypted backup could not be reopened with its passphrase.
+            copy_table!(CRYPTO);
             copy_table!(SUBDOMAINS);
             copy_table!(SUBDOMAIN_IDS);
             copy_table!(TAG_IDS);
@@ -175,28 +758,38 @@ impl Storage {
             t.get("schema_version")?.map(|g| g.value())
         };
         match current {
-            Some(v) if v == SCHEMA_VERSION => return Ok(()),
-            Some(v) if v > SCHEMA_VERSION => {
-                return Err(NucleusError::invalid(format!(
-                    "database schema v{v} is newer than supported v{SCHEMA_VERSION}; upgrade Nucleus"
-                )));
-            }
-            Some(v) => self.migrate(v, SCHEMA_VERSION)?, // v < current
-            None => {}                                   // fresh database
+            Some(v) if v == SCHEMA_VERSION => Ok(()),
+            Some(v) if v > SCHEMA_VERSION => Err(NucleusError::invalid(format!(
+                "database schema v{v} is newer than supported v{SCHEMA_VERSION}; upgrade Nucleus"
+            ))),
+            Some(v) => self.migrate(v), // v < SCHEMA_VERSION: stamps atomically
+            None => self.stamp_schema_version(SCHEMA_VERSION), // fresh database
         }
+    }
+
+    /// Stamp the schema version in its own transaction (fresh databases).
+    fn stamp_schema_version(&self, version: u64) -> Result<()> {
         let wtx = self.db.begin_write()?;
         {
             let mut t = wtx.open_table(META)?;
-            t.insert("schema_version", SCHEMA_VERSION)?;
+            t.insert("schema_version", version)?;
         }
         wtx.commit()?;
         Ok(())
     }
 
-    /// Apply migrations from `from` to `to`. Adding new tables/indexes is handled
-    /// by `init_tables` (forward-compatible), so v1 needs no data migration.
-    fn migrate(&self, _from: u64, _to: u64) -> Result<()> {
-        Ok(())
+    /// Refuse an in-place upgrade. The only pre-v2 on-disk format is a legacy
+    /// *plaintext* database, which is handled earlier by
+    /// [`migrate_legacy_if_needed`](Self::migrate_legacy_if_needed) by writing a
+    /// fresh v2 file (index keys keyed-hashed, no plaintext residue). An *encrypted*
+    /// database tagged below v2 would predate index-key hashing; we don't rewrite it
+    /// in place because removing the old plaintext keys would still leave them in
+    /// redb's freed pages. Recreate it (or restore a current backup) instead.
+    fn migrate(&self, from: u64) -> Result<()> {
+        Err(NucleusError::invalid(format!(
+            "encrypted database schema v{from} cannot be upgraded in place to v{SCHEMA_VERSION}; \
+             recreate the database (e.g. via an encrypted backup) to keyed-hash its index keys"
+        )))
     }
 
     /// Materialise every table once, so later read transactions never hit
@@ -213,6 +806,7 @@ impl Storage {
         wtx.open_table(JOBS_PENDING)?;
         wtx.open_table(SEQ)?;
         wtx.open_table(META)?;
+        wtx.open_table(CRYPTO)?;
         wtx.open_multimap_table(DOCS_BY_DOMAIN)?;
         wtx.open_multimap_table(CHUNKS_BY_DOMAIN)?;
         wtx.open_multimap_table(CHUNKS_BY_DOC)?;
@@ -247,7 +841,7 @@ impl Storage {
         };
         {
             let mut t = wtx.open_table(DOMAINS)?;
-            t.insert(id.get(), codec::encode(&domain)?.as_slice())?;
+            t.insert(id.get(), self.enc(&domain)?.as_slice())?;
         }
         wtx.commit()?;
         Ok(domain)
@@ -257,7 +851,7 @@ impl Storage {
         let rtx = self.db.begin_read()?;
         let t = rtx.open_table(DOMAINS)?;
         let bytes = t.get(id.get())?.ok_or(NucleusError::DomainNotFound(id))?;
-        codec::decode(bytes.value())
+        self.dec(bytes.value())
     }
 
     pub fn list_domains(&self) -> Result<Vec<Domain>> {
@@ -266,7 +860,7 @@ impl Storage {
         let mut out = Vec::new();
         for entry in t.iter()? {
             let (_, v) = entry?;
-            out.push(codec::decode::<Domain>(v.value())?);
+            out.push(self.dec::<Domain>(v.value())?);
         }
         Ok(out)
     }
@@ -299,7 +893,7 @@ impl Storage {
         };
         {
             let mut t = wtx.open_table(TAGS)?;
-            t.insert(id.get(), codec::encode(&tag)?.as_slice())?;
+            t.insert(id.get(), self.enc(&tag)?.as_slice())?;
         }
         {
             let mut idx = wtx.open_multimap_table(TAGS_BY_DOMAIN)?;
@@ -307,7 +901,7 @@ impl Storage {
         }
         {
             let mut names = wtx.open_table(TAG_IDS)?;
-            names.insert(name_key(domain_id, name).as_str(), id.get())?;
+            names.insert(self.name_key(domain_id, name).as_str(), id.get())?;
         }
         wtx.commit()?;
         Ok(tag)
@@ -317,7 +911,7 @@ impl Storage {
     pub fn tag_id_by_name(&self, domain_id: DomainId, name: &str) -> Result<Option<TagId>> {
         let rtx = self.db.begin_read()?;
         let t = rtx.open_table(TAG_IDS)?;
-        Ok(t.get(name_key(domain_id, name).as_str())?
+        Ok(t.get(self.name_key(domain_id, name).as_str())?
             .map(|g| TagId::new(g.value())))
     }
 
@@ -352,7 +946,7 @@ impl Storage {
         };
         {
             let mut t = wtx.open_table(SUBDOMAINS)?;
-            t.insert(id.get(), codec::encode(&sub)?.as_slice())?;
+            t.insert(id.get(), self.enc(&sub)?.as_slice())?;
         }
         {
             let mut idx = wtx.open_multimap_table(SUBDOMAINS_BY_DOMAIN)?;
@@ -360,7 +954,7 @@ impl Storage {
         }
         {
             let mut names = wtx.open_table(SUBDOMAIN_IDS)?;
-            names.insert(name_key(domain_id, name).as_str(), id.get())?;
+            names.insert(self.name_key(domain_id, name).as_str(), id.get())?;
         }
         wtx.commit()?;
         Ok(sub)
@@ -373,7 +967,7 @@ impl Storage {
     ) -> Result<Option<SubdomainId>> {
         let rtx = self.db.begin_read()?;
         let t = rtx.open_table(SUBDOMAIN_IDS)?;
-        Ok(t.get(name_key(domain_id, name).as_str())?
+        Ok(t.get(self.name_key(domain_id, name).as_str())?
             .map(|g| SubdomainId::new(g.value())))
     }
 
@@ -396,7 +990,7 @@ impl Storage {
         let bytes = t
             .get(id.get())?
             .ok_or(NucleusError::SubdomainNotFound(id))?;
-        codec::decode(bytes.value())
+        self.dec(bytes.value())
     }
 
     pub fn list_subdomains(&self, domain_id: DomainId) -> Result<Vec<Subdomain>> {
@@ -407,7 +1001,7 @@ impl Storage {
         for v in idx.get(domain_id.get())? {
             let sid = v?.value();
             if let Some(bytes) = subs.get(sid)? {
-                out.push(codec::decode::<Subdomain>(bytes.value())?);
+                out.push(self.dec::<Subdomain>(bytes.value())?);
             }
         }
         Ok(out)
@@ -417,7 +1011,7 @@ impl Storage {
         let rtx = self.db.begin_read()?;
         let t = rtx.open_table(TAGS)?;
         let bytes = t.get(id.get())?.ok_or(NucleusError::TagNotFound(id))?;
-        codec::decode(bytes.value())
+        self.dec(bytes.value())
     }
 
     pub fn list_tags(&self, domain_id: DomainId) -> Result<Vec<Tag>> {
@@ -428,7 +1022,7 @@ impl Storage {
         for v in idx.get(domain_id.get())? {
             let tag_id = v?.value();
             if let Some(bytes) = tags.get(tag_id)? {
-                out.push(codec::decode::<Tag>(bytes.value())?);
+                out.push(self.dec::<Tag>(bytes.value())?);
             }
         }
         Ok(out)
@@ -464,7 +1058,7 @@ impl Storage {
         };
         {
             let mut t = wtx.open_table(DOCUMENTS)?;
-            t.insert(id.get(), codec::encode(&doc)?.as_slice())?;
+            t.insert(id.get(), self.enc(&doc)?.as_slice())?;
         }
         {
             let mut idx = wtx.open_multimap_table(DOCS_BY_DOMAIN)?;
@@ -478,7 +1072,7 @@ impl Storage {
         let rtx = self.db.begin_read()?;
         let t = rtx.open_table(DOCUMENTS)?;
         let bytes = t.get(id.get())?.ok_or(NucleusError::DocumentNotFound(id))?;
-        codec::decode(bytes.value())
+        self.dec(bytes.value())
     }
 
     /// List documents in a domain, paginated (insertion order by id).
@@ -495,7 +1089,7 @@ impl Storage {
         for entry in by_domain.get(domain_id.get())?.skip(offset).take(limit) {
             let did = entry?.value();
             if let Some(b) = docs.get(did)? {
-                out.push(codec::decode::<Document>(b.value())?);
+                out.push(self.dec::<Document>(b.value())?);
             }
         }
         Ok(out)
@@ -508,7 +1102,7 @@ impl Storage {
         let mut out = Vec::new();
         for entry in t.iter()?.skip(offset).take(limit) {
             let (_, v) = entry?;
-            out.push(codec::decode::<Job>(v.value())?);
+            out.push(self.dec::<Job>(v.value())?);
         }
         Ok(out)
     }
@@ -521,7 +1115,7 @@ impl Storage {
     ) -> Result<Option<DocumentId>> {
         let rtx = self.db.begin_read()?;
         let t = rtx.open_table(DOCS_BY_HASH)?;
-        Ok(t.get(name_key(domain_id, hash).as_str())?
+        Ok(t.get(self.name_key(domain_id, hash).as_str())?
             .map(|g| DocumentId::new(g.value())))
     }
 
@@ -535,7 +1129,7 @@ impl Storage {
         let wtx = self.db.begin_write()?;
         {
             let mut t = wtx.open_table(DOCS_BY_HASH)?;
-            t.insert(name_key(domain_id, hash).as_str(), document_id.get())?;
+            t.insert(self.name_key(domain_id, hash).as_str(), document_id.get())?;
         }
         wtx.commit()?;
         Ok(())
@@ -556,7 +1150,7 @@ impl Storage {
             let Some(doc_bytes) = doc_bytes else {
                 return Err(NucleusError::DocumentNotFound(id));
             };
-            let doc: Document = codec::decode(&doc_bytes)?;
+            let doc: Document = self.dec(&doc_bytes)?;
 
             // Collect this document's chunk ids.
             let chunk_ids: Vec<u64> = {
@@ -578,13 +1172,13 @@ impl Storage {
 
             for cid in &chunk_ids {
                 if let Some(cb) = chunks.get(*cid)? {
-                    let chunk: Chunk = codec::decode(cb.value())?;
+                    let chunk: Chunk = self.dec(cb.value())?;
                     by_domain.remove(chunk.domain_id.get(), *cid)?;
                     for tag in &chunk.tags {
                         by_tag.remove(tag.get(), *cid)?;
                     }
                     for (k, v) in &chunk.metadata {
-                        by_meta.remove(meta_key(k, v).as_str(), *cid)?;
+                        by_meta.remove(self.meta_key(k, v).as_str(), *cid)?;
                     }
                     if let Some(sid) = chunk.subdomain_id {
                         by_sub.remove(sid.get(), *cid)?;
@@ -614,9 +1208,9 @@ impl Storage {
                 .get(id.get())?
                 .map(|g| g.value().to_vec())
                 .ok_or(NucleusError::DomainNotFound(id))?;
-            let mut domain: Domain = codec::decode(&bytes)?;
+            let mut domain: Domain = self.dec(&bytes)?;
             domain.name = name.to_string();
-            t.insert(id.get(), codec::encode(&domain)?.as_slice())?;
+            t.insert(id.get(), self.enc(&domain)?.as_slice())?;
             domain
         };
         wtx.commit()?;
@@ -659,12 +1253,12 @@ impl Storage {
                 let mut by_doc = wtx.open_multimap_table(CHUNKS_BY_DOC)?;
                 for cid in &chunk_ids {
                     if let Some(cb) = chunks.get(*cid)? {
-                        let chunk: Chunk = codec::decode(cb.value())?;
+                        let chunk: Chunk = self.dec(cb.value())?;
                         for tag in &chunk.tags {
                             by_tag.remove(tag.get(), *cid)?;
                         }
                         for (k, v) in &chunk.metadata {
-                            by_meta.remove(meta_key(k, v).as_str(), *cid)?;
+                            by_meta.remove(self.meta_key(k, v).as_str(), *cid)?;
                         }
                         if let Some(sid) = chunk.subdomain_id {
                             by_sub.remove(sid.get(), *cid)?;
@@ -737,7 +1331,7 @@ impl Storage {
             for v in by_domain.get(sub.domain_id.get())? {
                 let did = v?.value();
                 if let Some(b) = docs.get(did)? {
-                    let doc: Document = codec::decode(b.value())?;
+                    let doc: Document = self.dec(b.value())?;
                     if doc.subdomain_id == Some(id) {
                         out.push(DocumentId::new(did));
                     }
@@ -756,7 +1350,7 @@ impl Storage {
             wtx.open_multimap_table(SUBDOMAINS_BY_DOMAIN)?
                 .remove(sub.domain_id.get(), id.get())?;
             wtx.open_table(SUBDOMAIN_IDS)?
-                .remove(name_key(sub.domain_id, &sub.name).as_str())?;
+                .remove(self.name_key(sub.domain_id, &sub.name).as_str())?;
             // Defensive: drop any lingering chunk-by-subdomain entries.
             wtx.open_multimap_table(CHUNKS_BY_SUBDOMAIN)?
                 .remove_all(id.get())?;
@@ -780,14 +1374,14 @@ impl Storage {
                 .get(id.get())?
                 .map(|g| g.value().to_vec())
                 .ok_or(NucleusError::TagNotFound(id))?;
-            let mut tag: Tag = codec::decode(&bytes)?;
+            let mut tag: Tag = self.dec(&bytes)?;
             if let Some(d) = display_name {
                 tag.display_name = d.to_string();
             }
             if let Some(d) = description {
                 tag.description = d.to_string();
             }
-            t.insert(id.get(), codec::encode(&tag)?.as_slice())?;
+            t.insert(id.get(), self.enc(&tag)?.as_slice())?;
             tag
         };
         wtx.commit()?;
@@ -812,9 +1406,9 @@ impl Storage {
                     // mutating insert (can't hold both borrows of `chunks`).
                     let bytes = chunks.get(*cid)?.map(|g| g.value().to_vec());
                     if let Some(bytes) = bytes {
-                        let mut chunk: Chunk = codec::decode(&bytes)?;
+                        let mut chunk: Chunk = self.dec(&bytes)?;
                         chunk.tags.retain(|t| *t != id);
-                        chunks.insert(*cid, codec::encode(&chunk)?.as_slice())?;
+                        chunks.insert(*cid, self.enc(&chunk)?.as_slice())?;
                     }
                 }
             }
@@ -827,10 +1421,10 @@ impl Storage {
                 for d in &doc_ids {
                     let bytes = docs.get(*d)?.map(|g| g.value().to_vec());
                     if let Some(bytes) = bytes {
-                        let mut doc: Document = codec::decode(&bytes)?;
+                        let mut doc: Document = self.dec(&bytes)?;
                         if doc.tags.contains(&id) {
                             doc.tags.retain(|t| *t != id);
-                            docs.insert(*d, codec::encode(&doc)?.as_slice())?;
+                            docs.insert(*d, self.enc(&doc)?.as_slice())?;
                         }
                     }
                 }
@@ -841,7 +1435,7 @@ impl Storage {
             wtx.open_multimap_table(TAGS_BY_DOMAIN)?
                 .remove(tag.domain_id.get(), tid)?;
             wtx.open_table(TAG_IDS)?
-                .remove(name_key(tag.domain_id, &tag.name).as_str())?;
+                .remove(self.name_key(tag.domain_id, &tag.name).as_str())?;
         }
         wtx.commit()?;
         Ok(())
@@ -857,10 +1451,10 @@ impl Storage {
                 .get(id.get())?
                 .map(|g| g.value().to_vec())
                 .ok_or(NucleusError::DomainNotFound(id))?;
-            let mut domain: Domain = codec::decode(&bytes)?;
+            let mut domain: Domain = self.dec(&bytes)?;
             domain.model = model.to_string();
             domain.dim = dim;
-            t.insert(id.get(), codec::encode(&domain)?.as_slice())?;
+            t.insert(id.get(), self.enc(&domain)?.as_slice())?;
             domain
         };
         wtx.commit()?;
@@ -887,7 +1481,7 @@ impl Storage {
                 .get(id.get())?
                 .map(|g| g.value().to_vec())
                 .ok_or(NucleusError::DocumentNotFound(id))?;
-            let mut doc: Document = codec::decode(&bytes)?;
+            let mut doc: Document = self.dec(&bytes)?;
             let final_tags = new_tags.unwrap_or_else(|| doc.tags.clone());
             let final_sub = if change_subdomain {
                 new_subdomain
@@ -904,7 +1498,7 @@ impl Storage {
                 for cid in &chunk_ids {
                     let cb = chunks.get(*cid)?.map(|g| g.value().to_vec());
                     let Some(cb) = cb else { continue };
-                    let mut chunk: Chunk = codec::decode(&cb)?;
+                    let mut chunk: Chunk = self.dec(&cb)?;
                     // Tags: swap index entries old -> new.
                     for t in &chunk.tags {
                         by_tag.remove(t.get(), *cid)?;
@@ -923,13 +1517,13 @@ impl Storage {
                         }
                         chunk.subdomain_id = final_sub;
                     }
-                    chunks.insert(*cid, codec::encode(&chunk)?.as_slice())?;
+                    chunks.insert(*cid, self.enc(&chunk)?.as_slice())?;
                 }
             }
 
             doc.tags = final_tags;
             doc.subdomain_id = final_sub;
-            docs.insert(id.get(), codec::encode(&doc)?.as_slice())?;
+            docs.insert(id.get(), self.enc(&doc)?.as_slice())?;
             doc
         };
         wtx.commit()?;
@@ -971,11 +1565,11 @@ impl Storage {
         };
         {
             let mut t = wtx.open_table(CHUNKS)?;
-            t.insert(id.get(), codec::encode(&chunk)?.as_slice())?;
+            t.insert(id.get(), self.enc(&chunk)?.as_slice())?;
         }
         {
             let mut e = wtx.open_table(EMBEDDINGS)?;
-            e.insert(id.get(), codec::encode(&embedding.to_vec())?.as_slice())?;
+            e.insert(id.get(), self.enc(&embedding.to_vec())?.as_slice())?;
         }
         {
             let mut by_domain = wtx.open_multimap_table(CHUNKS_BY_DOMAIN)?;
@@ -988,7 +1582,7 @@ impl Storage {
             }
             let mut by_meta = wtx.open_multimap_table(CHUNKS_BY_META)?;
             for (k, v) in &chunk.metadata {
-                by_meta.insert(meta_key(k, v).as_str(), id.get())?;
+                by_meta.insert(self.meta_key(k, v).as_str(), id.get())?;
             }
             if let Some(sid) = subdomain_id {
                 let mut by_sub = wtx.open_multimap_table(CHUNKS_BY_SUBDOMAIN)?;
@@ -1045,15 +1639,15 @@ impl Storage {
                     prev: if i > 0 { Some(ids[i - 1]) } else { None },
                     next: ids.get(i + 1).copied(),
                 };
-                t.insert(id.get(), codec::encode(&chunk)?.as_slice())?;
-                emb.insert(id.get(), codec::encode(&nc.embedding.to_vec())?.as_slice())?;
+                t.insert(id.get(), self.enc(&chunk)?.as_slice())?;
+                emb.insert(id.get(), self.enc(&nc.embedding.to_vec())?.as_slice())?;
                 by_domain.insert(domain_id.get(), id.get())?;
                 by_doc.insert(document_id.get(), id.get())?;
                 for tag in tags {
                     by_tag.insert(tag.get(), id.get())?;
                 }
                 for (k, v) in metadata {
-                    by_meta.insert(meta_key(k, v).as_str(), id.get())?;
+                    by_meta.insert(self.meta_key(k, v).as_str(), id.get())?;
                 }
                 if let Some(sid) = subdomain_id {
                     by_sub.insert(sid.get(), id.get())?;
@@ -1079,10 +1673,10 @@ impl Storage {
                 let Some(bytes) = bytes else {
                     continue;
                 };
-                let mut chunk: Chunk = codec::decode(&bytes)?;
+                let mut chunk: Chunk = self.dec(&bytes)?;
                 chunk.prev = if i > 0 { Some(ids[i - 1]) } else { None };
                 chunk.next = ids.get(i + 1).copied();
-                chunks.insert(cid.get(), codec::encode(&chunk)?.as_slice())?;
+                chunks.insert(cid.get(), self.enc(&chunk)?.as_slice())?;
             }
         }
         wtx.commit()?;
@@ -1093,14 +1687,14 @@ impl Storage {
         let rtx = self.db.begin_read()?;
         let t = rtx.open_table(CHUNKS)?;
         let bytes = t.get(id.get())?.ok_or(NucleusError::ChunkNotFound(id))?;
-        codec::decode(bytes.value())
+        self.dec(bytes.value())
     }
 
     pub fn get_embedding(&self, id: ChunkId) -> Result<Vec<f32>> {
         let rtx = self.db.begin_read()?;
         let t = rtx.open_table(EMBEDDINGS)?;
         let bytes = t.get(id.get())?.ok_or(NucleusError::ChunkNotFound(id))?;
-        codec::decode(bytes.value())
+        self.dec(bytes.value())
     }
 
     /// Overwrite a chunk's embedding vector (used by reindex). One transaction.
@@ -1108,7 +1702,7 @@ impl Storage {
         let wtx = self.db.begin_write()?;
         {
             let mut t = wtx.open_table(EMBEDDINGS)?;
-            t.insert(id.get(), codec::encode(&embedding.to_vec())?.as_slice())?;
+            t.insert(id.get(), self.enc(&embedding.to_vec())?.as_slice())?;
         }
         wtx.commit()?;
         Ok(())
@@ -1124,7 +1718,7 @@ impl Storage {
         for v in by_domain.get(domain_id.get())? {
             let cid = v?.value();
             if let Some(b) = chunks.get(cid)? {
-                let chunk: Chunk = codec::decode(b.value())?;
+                let chunk: Chunk = self.dec(b.value())?;
                 out.push((ChunkId::new(cid), chunk.text));
             }
         }
@@ -1141,7 +1735,7 @@ impl Storage {
         for v in by_domain.get(domain_id.get())? {
             let cid = v?.value();
             if let Some(bytes) = emb.get(cid)? {
-                out.push((ChunkId::new(cid), codec::decode::<Vec<f32>>(bytes.value())?));
+                out.push((ChunkId::new(cid), self.dec::<Vec<f32>>(bytes.value())?));
             }
         }
         Ok(out)
@@ -1176,7 +1770,7 @@ impl Storage {
         let rtx = self.db.begin_read()?;
         let by_meta = rtx.open_multimap_table(CHUNKS_BY_META)?;
         let mut set = HashSet::new();
-        for v in by_meta.get(meta_key(key, value).as_str())? {
+        for v in by_meta.get(self.meta_key(key, value).as_str())? {
             set.insert(ChunkId::new(v?.value()));
         }
         Ok(set)
@@ -1245,7 +1839,7 @@ impl Storage {
         };
         {
             let mut t = wtx.open_table(TOKENS)?;
-            t.insert(hash.as_slice(), codec::encode(&token)?.as_slice())?;
+            t.insert(hash.as_slice(), self.enc(&token)?.as_slice())?;
         }
         wtx.commit()?;
         Ok(token)
@@ -1255,7 +1849,7 @@ impl Storage {
         let rtx = self.db.begin_read()?;
         let t = rtx.open_table(TOKENS)?;
         match t.get(hash.as_slice())? {
-            Some(bytes) => Ok(Some(codec::decode(bytes.value())?)),
+            Some(bytes) => Ok(Some(self.dec(bytes.value())?)),
             None => Ok(None),
         }
     }
@@ -1266,7 +1860,7 @@ impl Storage {
         let mut out = Vec::new();
         for entry in t.iter()? {
             let (_, v) = entry?;
-            out.push(codec::decode::<ApiToken>(v.value())?);
+            out.push(self.dec::<ApiToken>(v.value())?);
         }
         Ok(out)
     }
@@ -1282,7 +1876,7 @@ impl Storage {
             let mut f = None;
             for entry in t.iter()? {
                 let (k, v) = entry?;
-                let tok: ApiToken = codec::decode(v.value())?;
+                let tok: ApiToken = self.dec(v.value())?;
                 if tok.id == id {
                     f = Some((k.value().to_vec(), tok));
                     break;
@@ -1298,7 +1892,7 @@ impl Storage {
         {
             let mut t = wtx.open_table(TOKENS)?;
             t.remove(old_hash.as_slice())?;
-            t.insert(new_hash.as_slice(), codec::encode(&tok)?.as_slice())?;
+            t.insert(new_hash.as_slice(), self.enc(&tok)?.as_slice())?;
         }
         wtx.commit()?;
         Ok(Some(tok))
@@ -1318,7 +1912,7 @@ impl Storage {
             let mut found = None;
             for entry in t.iter()? {
                 let (k, v) = entry?;
-                let token: ApiToken = codec::decode(v.value())?;
+                let token: ApiToken = self.dec(v.value())?;
                 if token.id == id {
                     found = Some(k.value().to_vec());
                     break;
@@ -1358,7 +1952,7 @@ impl Storage {
         };
         {
             let mut jobs = wtx.open_table(JOBS)?;
-            jobs.insert(id.get(), codec::encode(&job)?.as_slice())?;
+            jobs.insert(id.get(), self.enc(&job)?.as_slice())?;
         }
         {
             let mut pending = wtx.open_table(JOBS_PENDING)?;
@@ -1372,7 +1966,7 @@ impl Storage {
         let rtx = self.db.begin_read()?;
         let t = rtx.open_table(JOBS)?;
         let bytes = t.get(id.get())?.ok_or(NucleusError::JobNotFound(id))?;
-        codec::decode(bytes.value())
+        self.dec(bytes.value())
     }
 
     /// Atomically pick the oldest `Pending` job, mark it `Running` (incrementing
@@ -1392,11 +1986,11 @@ impl Storage {
                     match bytes {
                         None => None, // stale pending entry; skip
                         Some(bytes) => {
-                            let mut job: Job = codec::decode(&bytes)?;
+                            let mut job: Job = self.dec(&bytes)?;
                             job.status = JobStatus::Running;
                             job.attempts += 1;
                             job.updated_at = now_millis();
-                            jobs.insert(jid, codec::encode(&job)?.as_slice())?;
+                            jobs.insert(jid, self.enc(&job)?.as_slice())?;
                             Some(job)
                         }
                     }
@@ -1416,11 +2010,11 @@ impl Storage {
             let Some(bytes) = bytes else {
                 return Err(NucleusError::JobNotFound(id));
             };
-            let mut job: Job = codec::decode(&bytes)?;
+            let mut job: Job = self.dec(&bytes)?;
             job.status = status;
             job.error = error;
             job.updated_at = now_millis();
-            jobs.insert(id.get(), codec::encode(&job)?.as_slice())?;
+            jobs.insert(id.get(), self.enc(&job)?.as_slice())?;
         }
         {
             // Keep the pending set in sync: re-add on retry, drop otherwise.
@@ -1444,7 +2038,7 @@ impl Storage {
             let mut ids = Vec::new();
             for entry in jobs.iter()? {
                 let (k, v) = entry?;
-                let job: Job = codec::decode(v.value())?;
+                let job: Job = self.dec(v.value())?;
                 if matches!(job.status, JobStatus::Done | JobStatus::Failed)
                     && job.updated_at < cutoff_ms
                 {
@@ -1479,7 +2073,7 @@ impl Storage {
             let mut to_update = Vec::new();
             for entry in jobs.iter()? {
                 let (k, v) = entry?;
-                let job: Job = codec::decode(v.value())?;
+                let job: Job = self.dec(v.value())?;
                 if matches!(job.status, JobStatus::Running) {
                     to_update.push((k.value(), job));
                 }
@@ -1488,7 +2082,7 @@ impl Storage {
             for (id, mut job) in to_update {
                 job.status = JobStatus::Pending;
                 job.updated_at = now_millis();
-                jobs.insert(id, codec::encode(&job)?.as_slice())?;
+                jobs.insert(id, self.enc(&job)?.as_slice())?;
                 pending.insert(id, ())?;
                 count += 1;
             }
@@ -1498,15 +2092,90 @@ impl Storage {
     }
 }
 
-/// Encode a metadata `key`/`value` pair into a single multimap key. The unit
-/// separator (`\u{1f}`) keeps `a`+`bc` distinct from `ab`+`c`.
-fn meta_key(key: &str, value: &str) -> String {
-    format!("{key}\u{1f}{value}")
+/// The plaintext crypto header written alongside the data: how the key is
+/// derived (`mode`), the Argon2id `salt`/`kdf` (passphrase mode only) and an
+/// encrypted `verifier` used to detect a wrong key. Never itself encrypted.
+struct CryptoHeader {
+    mode: &'static [u8],
+    salt: Option<Vec<u8>>,
+    kdf: Option<[u8; 12]>,
+    verifier: Vec<u8>,
 }
 
-/// Build a `"domain\u{1f}name"` key for the by-name indexes (subdomains, tags).
-fn name_key(domain_id: DomainId, name: &str) -> String {
-    format!("{}\u{1f}{}", domain_id.get(), name)
+/// Resolve where the machine key file lives. **Deliberately independent of the
+/// database location** so a backup of the data never sits with the key: explicit
+/// `keyfile`, else `NUCLEUS_KEYFILE`, else an OS per-user config dir. Errors when
+/// no location can be determined (the caller should set `NUCLEUS_KEYFILE` or use a
+/// passphrase) — it never silently falls back to the database directory.
+fn resolve_keyfile(explicit: Option<&Path>) -> Result<PathBuf> {
+    if let Some(p) = explicit {
+        return Ok(p.to_path_buf());
+    }
+    if let Some(p) = std::env::var_os("NUCLEUS_KEYFILE").filter(|s| !s.is_empty()) {
+        return Ok(PathBuf::from(p));
+    }
+    match config_base_dir() {
+        Some(base) => Ok(base.join("Nucleus").join("nucleus.key")),
+        None => Err(NucleusError::crypto(
+            "cannot determine a key-file location; set NUCLEUS_KEYFILE or open with a passphrase",
+        )),
+    }
+}
+
+/// OS per-user **config** directory (kept separate from data/backup dirs).
+#[cfg(windows)]
+fn config_base_dir() -> Option<PathBuf> {
+    std::env::var_os("APPDATA")
+        .or_else(|| std::env::var_os("LOCALAPPDATA"))
+        .map(PathBuf::from)
+}
+
+/// OS per-user config directory on non-Windows (`$XDG_CONFIG_HOME` or `~/.config`).
+#[cfg(not(windows))]
+fn config_base_dir() -> Option<PathBuf> {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+}
+
+/// Build a fresh cipher + crypto header for a new encrypted database: passphrase
+/// mode (Argon2id) when one is given, otherwise machine-key mode (the key file is
+/// created on first use at the resolved location).
+fn resolve_new_cipher(
+    passphrase: Option<&str>,
+    keyfile: Option<&Path>,
+) -> Result<(Cipher, CryptoHeader)> {
+    match passphrase.filter(|p| !p.is_empty()) {
+        Some(pass) => {
+            let salt = crate::crypto::random_bytes(crate::crypto::SALT_LEN);
+            let params = KdfParams::DEFAULT;
+            let cipher = Cipher::from_passphrase(pass, &salt, params)?;
+            let verifier = cipher.seal(CRYPTO_MAGIC)?;
+            Ok((
+                cipher,
+                CryptoHeader {
+                    mode: MODE_PASSPHRASE,
+                    salt: Some(salt),
+                    kdf: Some(params.to_bytes()),
+                    verifier,
+                },
+            ))
+        }
+        None => {
+            let key = crate::crypto::load_or_create_machine_key(&resolve_keyfile(keyfile)?)?;
+            let cipher = Cipher::new(&key);
+            let verifier = cipher.seal(CRYPTO_MAGIC)?;
+            Ok((
+                cipher,
+                CryptoHeader {
+                    mode: MODE_MACHINE,
+                    salt: None,
+                    kdf: None,
+                    verifier,
+                },
+            ))
+        }
+    }
 }
 
 /// Collect all values a `u64 -> u64` multimap holds for `key` into a `Vec`.
@@ -1566,7 +2235,7 @@ mod tests {
 
     fn temp_db() -> (Storage, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Storage::open(dir.path().join("nucleus.redb")).unwrap();
+        let storage = Storage::open_ephemeral(dir.path().join("nucleus.redb")).unwrap();
         (storage, dir)
     }
 
@@ -1807,5 +2476,254 @@ mod tests {
         ));
         assert!(s.get_document(other.id).is_ok());
         assert_eq!(s.subdomain_id_by_name(dom.id, "irpf").unwrap(), None);
+    }
+
+    #[test]
+    fn encrypted_roundtrip_and_passphrase_checks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("enc.redb");
+        let dom_id;
+        {
+            let s = Storage::open_with_passphrase(&path, Some("pw-correcta")).unwrap();
+            assert!(s.is_encrypted());
+            let dom = s.create_domain("docs", "m", 2).unwrap();
+            dom_id = dom.id;
+            let doc = s
+                .create_document(dom.id, None, "d", None, Default::default(), vec![])
+                .unwrap();
+            s.insert_chunk(
+                dom.id,
+                doc.id,
+                None,
+                0,
+                "texto secreto",
+                &[],
+                Default::default(),
+                &[1.0, 0.0],
+            )
+            .unwrap();
+        }
+        // Reopen with the right passphrase: data is readable.
+        {
+            let s = Storage::open_with_passphrase(&path, Some("pw-correcta")).unwrap();
+            assert!(s.is_encrypted());
+            assert_eq!(s.get_domain(dom_id).unwrap().name, "docs");
+            assert_eq!(s.embeddings_in_domain(dom_id).unwrap().len(), 1);
+        }
+        // Wrong passphrase is refused without exposing data.
+        assert!(matches!(
+            Storage::open_with_passphrase(&path, Some("incorrecta")),
+            Err(NucleusError::Crypto(_))
+        ));
+        // Opening an encrypted DB with no passphrase is refused.
+        assert!(matches!(
+            Storage::open_ephemeral(&path),
+            Err(NucleusError::Crypto(_))
+        ));
+    }
+
+    #[test]
+    fn machine_key_roundtrip_without_passphrase() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("m.redb");
+        let dom_id;
+        {
+            let s = Storage::open_ephemeral(&path).unwrap(); // machine-key mode (no passphrase)
+            assert!(s.is_encrypted());
+            dom_id = s.create_domain("docs", "m", 2).unwrap().id;
+        }
+        // The key file persists (here in the tempdir), so reopening needs no passphrase.
+        assert!(dir.path().join(".nucleus-test.key").exists());
+        let s = Storage::open_ephemeral(&path).unwrap();
+        assert_eq!(s.get_domain(dom_id).unwrap().name, "docs");
+    }
+
+    #[test]
+    fn legacy_plaintext_auto_migrates_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.redb");
+        let dom_id;
+        {
+            // Fabricate a legacy unencrypted database (no crypto header).
+            let s = Storage::open_plaintext(&path).unwrap();
+            assert!(!s.is_encrypted());
+            dom_id = s.create_domain("docs", "m", 2).unwrap().id;
+            let doc = s
+                .create_document(dom_id, None, "d", None, Default::default(), vec![])
+                .unwrap();
+            s.insert_chunk(
+                dom_id,
+                doc.id,
+                None,
+                0,
+                "texto",
+                &[],
+                Default::default(),
+                &[1.0, 0.0],
+            )
+            .unwrap();
+        }
+        // Opening it transparently encrypts it in place (machine key).
+        {
+            let s = Storage::open_ephemeral(&path).unwrap();
+            assert!(s.is_encrypted());
+            assert_eq!(s.get_domain(dom_id).unwrap().name, "docs");
+            assert_eq!(s.embeddings_in_domain(dom_id).unwrap().len(), 1);
+        }
+        // It stays encrypted on the next open (no second migration).
+        let s = Storage::open_ephemeral(&path).unwrap();
+        assert!(s.is_encrypted());
+        assert_eq!(s.get_domain(dom_id).unwrap().name, "docs");
+    }
+
+    #[test]
+    fn encrypted_backup_reopens_with_passphrase() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("enc.redb");
+        let dst = dir.path().join("backup.redb");
+        let dom_id;
+        {
+            let s = Storage::open_with_passphrase(&src, Some("clave")).unwrap();
+            dom_id = s.create_domain("docs", "m", 2).unwrap().id;
+            s.backup_to(&dst).unwrap();
+        }
+        // The snapshot carries the crypto header, so it reopens with the same key.
+        let s = Storage::open_with_passphrase(&dst, Some("clave")).unwrap();
+        assert!(s.is_encrypted());
+        assert_eq!(s.get_domain(dom_id).unwrap().name, "docs");
+    }
+
+    fn file_contains(path: &std::path::Path, needle: &str) -> bool {
+        let bytes = std::fs::read(path).unwrap();
+        let n = needle.as_bytes();
+        !n.is_empty() && bytes.windows(n.len()).any(|w| w == n)
+    }
+
+    #[test]
+    fn index_keys_are_opaque_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opaque.redb");
+        let dom_id;
+        let tag_id;
+        {
+            let s = Storage::open_ephemeral(&path).unwrap();
+            let dom = s.create_domain("docs", "m", 2).unwrap();
+            let tag = s
+                .create_tag(dom.id, "tag-OPAQUE-aaa", "dn", "", None)
+                .unwrap();
+            let doc = s
+                .create_document(dom.id, None, "d", None, Default::default(), vec![])
+                .unwrap();
+            let mut meta = std::collections::BTreeMap::new();
+            meta.insert("author".to_string(), "alice-OPAQUE-bbb".to_string());
+            s.insert_chunk(dom.id, doc.id, None, 0, "x", &[tag.id], meta, &[1.0, 0.0])
+                .unwrap();
+            dom_id = dom.id;
+            tag_id = tag.id;
+        }
+        // The tag name and the metadata value must not appear on disk in the clear.
+        assert!(!file_contains(&path, "tag-OPAQUE-aaa"), "tag name leaked");
+        assert!(
+            !file_contains(&path, "alice-OPAQUE-bbb"),
+            "meta value leaked"
+        );
+        // ...yet the keyed lookups still resolve exactly.
+        let s = Storage::open_ephemeral(&path).unwrap();
+        assert_eq!(
+            s.tag_id_by_name(dom_id, "tag-OPAQUE-aaa").unwrap(),
+            Some(tag_id)
+        );
+        assert_eq!(
+            s.candidates_for_meta("author", "alice-OPAQUE-bbb")
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn rekey_changes_key_and_preserves_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.redb");
+        let dst = dir.path().join("dst.redb");
+        let dom_id;
+        let tag_id;
+        {
+            let s = Storage::open_with_passphrase(&src, Some("old-pass")).unwrap();
+            let dom = s.create_domain("docs", "m", 2).unwrap();
+            let tag = s.create_tag(dom.id, "rk-tag", "dn", "", None).unwrap();
+            let doc = s
+                .create_document(dom.id, None, "d", None, Default::default(), vec![])
+                .unwrap();
+            let mut meta = std::collections::BTreeMap::new();
+            meta.insert("a".to_string(), "rk-val".to_string());
+            s.insert_chunk(dom.id, doc.id, None, 0, "x", &[tag.id], meta, &[1.0, 0.0])
+                .unwrap();
+            dom_id = dom.id;
+            tag_id = tag.id;
+            // Rotate to a new passphrase.
+            s.rekey_to(&dst, Some("new-pass"), None).unwrap();
+        }
+        // The rotated copy opens with the NEW key and keeps all data + lookups.
+        {
+            let s = Storage::open_with_passphrase(&dst, Some("new-pass")).unwrap();
+            assert_eq!(s.get_domain(dom_id).unwrap().name, "docs");
+            assert_eq!(s.tag_id_by_name(dom_id, "rk-tag").unwrap(), Some(tag_id));
+            assert_eq!(s.candidates_for_meta("a", "rk-val").unwrap().len(), 1);
+        }
+        // The OLD key no longer opens it (drop the handle above first — redb allows
+        // a single open per file).
+        assert!(matches!(
+            Storage::open_with_passphrase(&dst, Some("old-pass")),
+            Err(NucleusError::Crypto(_))
+        ));
+    }
+
+    #[test]
+    fn legacy_migration_hashes_index_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.redb");
+        let dom_id;
+        {
+            // Fabricate a legacy plaintext DB with sensitive index keys.
+            let s = Storage::open_plaintext(&path).unwrap();
+            let dom = s.create_domain("docs", "m", 2).unwrap();
+            dom_id = dom.id;
+            let tag = s
+                .create_tag(dom.id, "legacy-tag-CCC", "dn", "", None)
+                .unwrap();
+            let doc = s
+                .create_document(dom.id, None, "d", None, Default::default(), vec![])
+                .unwrap();
+            let mut meta = std::collections::BTreeMap::new();
+            meta.insert("k".to_string(), "legacy-val-DDD".to_string());
+            s.insert_chunk(dom.id, doc.id, None, 0, "x", &[tag.id], meta, &[1.0, 0.0])
+                .unwrap();
+            s.set_document_hash(dom.id, doc.id, "legacyhashEEE")
+                .unwrap();
+        }
+        // Opening auto-encrypts AND the v1→v2 migration keyed-hashes the index keys.
+        {
+            let s = Storage::open_ephemeral(&path).unwrap();
+            assert!(s.is_encrypted());
+            assert!(s
+                .tag_id_by_name(dom_id, "legacy-tag-CCC")
+                .unwrap()
+                .is_some());
+            assert_eq!(
+                s.candidates_for_meta("k", "legacy-val-DDD").unwrap().len(),
+                1
+            );
+            assert!(s
+                .document_id_by_hash(dom_id, "legacyhashEEE")
+                .unwrap()
+                .is_some());
+        }
+        assert!(!file_contains(&path, "legacy-tag-CCC"), "tag name leaked");
+        assert!(!file_contains(&path, "legacy-val-DDD"), "meta value leaked");
+        assert!(
+            !file_contains(&path, "legacyhashEEE"),
+            "content hash leaked"
+        );
     }
 }

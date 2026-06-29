@@ -25,6 +25,71 @@ Con ese token admin, crea tokens con menos privilegios para tus aplicaciones (ve
   HTTP plano; no pongas `NUCLEUS_ADDR` en una interfaz pública sin TLS por delante.
 - Limita el acceso de red al puerto; el `admin` puede crear dominios y tokens.
 
+## Cifrado en reposo
+
+El cifrado en reposo está **siempre activo**: no existe modo sin cifrar. Cada valor
+se cifra con **XChaCha20-Poly1305** (AEAD simétrico, post-cuántico-seguro: Grover solo
+reduce una clave de 256 bits a ~128 efectivos). Además, las **claves de índice
+sensibles** —nombres de tags/subdominios, pares clave/valor de metadatos y hashes de
+contenido— se ofuscan con **HMAC-SHA256 con clave**, así no quedan en claro en el
+fichero pero los lookups exactos siguen funcionando.
+
+### Origen de la clave
+
+| Modo | Cómo se activa | Propiedades |
+|------|----------------|-------------|
+| **Passphrase** | `NUCLEUS_PASSPHRASE` (server) · `passphrase` en `nucleus_open` (FFI) | Clave derivada con **Argon2id**. **Portable y recuperable**: la misma frase reabre la BD en cualquier máquina. Recomendado para backups que salen de la máquina. |
+| **Clave de máquina** (por defecto) | sin passphrase | Clave aleatoria en un fichero protegido por el SO (**DPAPI** en Windows, permisos `0600` en el resto). Cero configuración, pero **ligada a esa máquina/usuario**. |
+
+**El fichero de clave vive separado de la base de datos**, nunca dentro del directorio
+de datos ni de los backups. Ubicación: `NUCLEUS_KEYFILE` si se indica; si no, un
+directorio de configuración del usuario (`%APPDATA%\Nucleus\nucleus.key` en Windows,
+`~/.config/nucleus/nucleus.key` en otros). Respaldar la clave es un **proceso aparte y
+manual** que decides tú.
+
+> ⚠️ **Si pierdes el fichero de clave de máquina, los datos son irrecuperables.** No hay
+> puerta trasera. Para protección recuperable y portable, usa una **passphrase**.
+
+### Backups y rotación
+
+- **Backup**: el snapshot (`/v1/maintenance/...`, `nucleus_backup`, o `Engine::backup_to`)
+  va cifrado con la misma clave que la BD y **nunca contiene la clave**. Un backup con
+  clave de máquina solo se restaura en una máquina que tenga su fichero de clave; un
+  backup con **passphrase** se restaura en cualquier sitio con la frase.
+- **Rotación de clave** (`nucleus_rekey` / `Engine::rekey_to`): escribe una copia
+  re-cifrada bajo una clave nueva (otra passphrase, o nueva clave de máquina). Actívala
+  reabriendo sobre el fichero nuevo con la clave nueva. *Nota*: el índice de
+  deduplicación por hash se reinicia (reingestar un documento idéntico previo a la
+  rotación puede duplicarlo).
+- **Migración transparente**: una BD sin cifrar de una versión anterior se **migra sola**
+  al abrirla (se reescribe cifrada con un swap atómico, sin dejar texto en claro).
+
+### Modelo de amenaza y límites conocidos
+
+Protege frente a **robo del fichero/disco** (portátil perdido, copia del `.redb`,
+backup extraviado). **No** protege frente a un proceso vivo comprometido o un volcado de
+memoria (la clave y los datos descifrados están en RAM; se hace *best-effort* de borrado
+con `zeroize`, pero no es una garantía).
+
+Quedan **visibles** aunque uses cifrado:
+
+- **Recuentos y cardinalidad**: número de dominios, documentos, chunks, tags y de pares
+  de metadatos distintos (tamaños de tabla). Ocultarlos requeriría padding/estructuras
+  oblivious, fuera de alcance.
+- El **grafo de asociación** entre tokens opacos de metadatos y los chunks que los
+  comparten (los valores en sí no son adivinables sin la clave).
+- **Residuo a nivel de sistema de ficheros**: tras la migración automática, los bloques
+  del fichero en claro original quedan liberados en el disco (fuera del `.redb`) y son
+  recuperables con *carving* de disco a bajo nivel. Si te preocupa ese vector, parte de
+  una BD cifrada desde el inicio o borra de forma segura el medio.
+
+### Modo embebido (DLL)
+
+Mismo comportamiento. Pasa `passphrase`/`keyfile` en el JSON de `nucleus_open`. Como la
+librería no escribe logs, **el aviso de "respalda la clave de máquina" es
+responsabilidad de tu app**: si abres sin passphrase, recuerda al usuario que conserve
+el fichero de clave (o configura una passphrase).
+
 ## Jobs y escalabilidad
 
 - La ingesta (troceo + embeddings) corre en una **cola persistida en la BD** con

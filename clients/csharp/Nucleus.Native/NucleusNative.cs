@@ -138,6 +138,27 @@ public sealed class NucleusEngine : IDisposable
     public int PersistIndexes() =>
         CallNoArg<PersistedEnvelope>(nucleus_persist_indexes).Persisted;
 
+    /// <summary>
+    /// Write a consistent, encrypted snapshot of the whole database to
+    /// <paramref name="destPath"/> (a standalone redb file; its directory is
+    /// created if missing). Safe to call while in use. The snapshot never contains
+    /// the key. Restore by opening the file as a database: with a machine key it
+    /// reopens given the same (separately-managed) key file; for a fully portable
+    /// backup, open the engine with a passphrase.
+    /// </summary>
+    public void Backup(string destPath) =>
+        Call<BackupEnvelope>(nucleus_backup, new { dest_path = destPath });
+
+    /// <summary>
+    /// Rotate the encryption key: write a copy of the database at
+    /// <paramref name="destPath"/> re-encrypted under a new key (a new
+    /// <paramref name="passphrase"/>, or — when null — a machine key, optionally at
+    /// <paramref name="keyfile"/>). Activate it by reopening on <paramref name="destPath"/>
+    /// with the new key. The content-hash dedup index is reset.
+    /// </summary>
+    public void Rekey(string destPath, string? passphrase = null, string? keyfile = null) =>
+        Call<RekeyEnvelope>(nucleus_rekey, new { dest_path = destPath, passphrase, keyfile });
+
     /// <summary>List all domains.</summary>
     public IReadOnlyList<Domain> ListDomains() =>
         CallNoArg<DomainsEnvelope>(nucleus_list_domains).Domains;
@@ -272,6 +293,8 @@ public sealed class NucleusEngine : IDisposable
     private sealed record DeletedEnvelope(bool Deleted);
     private sealed record PersistedEnvelope(int Persisted);
     private sealed record ReindexedEnvelope(int Reindexed);
+    private sealed record BackupEnvelope(bool BackedUp, string Path);
+    private sealed record RekeyEnvelope(bool Rekeyed, string Path);
 
     // --- P/Invoke ----------------------------------------------------------
 
@@ -295,6 +318,12 @@ public sealed class NucleusEngine : IDisposable
 
     [DllImport(Dll)]
     private static extern int nucleus_persist_indexes(IntPtr handle, out IntPtr outJson);
+
+    [DllImport(Dll, CharSet = CharSet.Ansi)]
+    private static extern int nucleus_backup(IntPtr handle, string inputJson, out IntPtr outJson);
+
+    [DllImport(Dll, CharSet = CharSet.Ansi)]
+    private static extern int nucleus_rekey(IntPtr handle, string inputJson, out IntPtr outJson);
 
     [DllImport(Dll)]
     private static extern int nucleus_list_domains(IntPtr handle, out IntPtr outJson);

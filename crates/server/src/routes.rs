@@ -989,8 +989,11 @@ async fn restore_backup(
     let kind = st.index_kind;
     let index_dir = st.data_dir.join(format!("indexes-restored-{ts}"));
     let db_for_open = new_db.clone();
+    let passphrase = st.passphrase.clone();
+    let keyfile = st.keyfile.clone();
     let new_engine = blocking(move || {
-        let storage = Storage::open(&db_for_open)?;
+        let storage =
+            Storage::open_with_options(&db_for_open, passphrase.as_deref(), keyfile.as_deref())?;
         Engine::open(storage, embedder, kind, Some(index_dir))
     })
     .await?;
@@ -1069,7 +1072,10 @@ mod tests {
 
     fn harness_rpm(rate_limit_rpm: u32) -> (Harness, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Storage::open(dir.path().join("n.redb")).unwrap();
+        // Hermetic: keep the machine key file inside the tempdir.
+        let keyfile = dir.path().join("n.key");
+        let storage =
+            Storage::open_with_options(dir.path().join("n.redb"), None, Some(&keyfile)).unwrap();
         let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(64));
         let engine = Arc::new(Engine::new(storage, embedder.clone()).unwrap());
         let token = engine.bootstrap_admin_token().unwrap().unwrap();
@@ -1098,6 +1104,8 @@ mod tests {
                 keep_fulls: 7,
             })),
             rate_limit_rpm,
+            passphrase: None,
+            keyfile: Some(keyfile.clone()),
         };
         (
             Harness {
