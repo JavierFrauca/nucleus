@@ -71,3 +71,15 @@ jobs:
             target/release/libnucleus.so
             target/release/libnucleus.dylib
           if-no-files-found: warn
+      # Smoke-test the Linux/macOS packaging script (the one Release uses) on every
+      # run, and upload the bundle so it can be inspected without cutting a tag.
+      - name: Package bundle (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: bash packaging/build-lib.sh dev
+      - name: Upload bundle
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nucleus-bundle-${{ matrix.os }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
