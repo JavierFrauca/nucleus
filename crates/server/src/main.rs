@@ -43,7 +43,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("opening restored database at {}", db_path.display());
     }
 
-    let storage = Storage::open(&db_path)?;
+    let storage = Storage::open_with_options(
+        &db_path,
+        cfg.passphrase.as_deref(),
+        cfg.keyfile.as_deref(),
+    )?;
+    if cfg.passphrase.is_some() {
+        tracing::info!("encryption at rest: on (XChaCha20-Poly1305, passphrase key)");
+    } else {
+        tracing::info!("encryption at rest: on (XChaCha20-Poly1305, machine key)");
+        tracing::warn!(
+            "using a machine key{}: BACK IT UP — losing the key file makes this database \
+             unrecoverable. Set NUCLEUS_PASSPHRASE for portable, recoverable protection.",
+            cfg.keyfile
+                .as_deref()
+                .map(|p| format!(" at {}", p.display()))
+                .unwrap_or_else(|| " (NUCLEUS_KEYFILE / default user-config location)".to_string())
+        );
+    }
     let embedder: Arc<dyn Embedder> = Arc::new(LocalEmbedder::with_options(
         cfg.model_cache.clone(),
         cfg.gpu,
@@ -148,6 +165,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         data_dir,
         schedule,
         rate_limit_rpm: cfg.rate_limit_rpm,
+        passphrase: cfg.passphrase.clone(),
+        keyfile: cfg.keyfile.clone(),
     };
     tracing::info!(
         "rate limiting: {}",

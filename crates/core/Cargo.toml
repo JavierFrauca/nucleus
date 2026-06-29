@@ -21,6 +21,18 @@ hnsw_rs = "0.3"
 ouroboros = "0.18"
 sha2 = "0.10"
 rand = "0.9"
+# Encryption at rest (opt-in): symmetric AEAD + memory-hard KDF. Both pure-Rust
+# (no C toolchain), so the self-contained Windows DLL keeps building unchanged.
+# XChaCha20-Poly1305 (256-bit key) is already post-quantum-safe; the passphrase
+# is stretched with Argon2id.
+chacha20poly1305 = "0.10"
+argon2 = "0.5"
+# Keyed hash (HMAC-SHA256) used to make sensitive **index keys** (tag/subdomain
+# names, metadata key/value, content hashes) opaque on disk while keeping exact
+# lookups. Deterministic + keyed, so it hides values yet survives equality joins.
+hmac = "0.12"
+# Best-effort scrubbing of key material from memory on drop.
+zeroize = "1"
 parking_lot = "0.12"
 serde_json = "1"
 # Binary delta (bsdiff) for full-fidelity differential backups.
@@ -33,6 +45,14 @@ zip = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
 # Only pulled in (with a GPU execution provider) when the `gpu` feature is on.
 ort = { version = "=2.0.0-rc.9", default-features = false, optional = true }
+
+# Machine-key protection for encryption at rest: DPAPI (CryptProtectData) wraps
+# the random key file on Windows. Other OSes use 0600 file permissions (std).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+] }
 
 [features]
 default = []

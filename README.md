@@ -57,7 +57,7 @@ Guías detalladas en [`docs/`](docs/):
 - [Referencia de la API](docs/api.md) — todos los endpoints con ejemplos.
 - [Contrato OpenAPI](docs/openapi.yaml) — especificación formal (genera clientes/docs).
 - [Lenguaje de consulta](docs/lenguaje-consulta.md) — el campo `filter`.
-- [Operación](docs/operacion.md) — seguridad, jobs, persistencia, memoria, backups.
+- [Operación](docs/operacion.md) — seguridad, **cifrado en reposo**, jobs, persistencia, memoria, backups.
 - [Rendimiento y carga](docs/rendimiento.md) — benchmarks reales (throughput, latencia, RAM/CPU, límites).
 - [Instalación y empaquetado](packaging/README.md) — Docker, binario/instalador Windows/Linux.
 - [Arquitectura](docs/arquitectura.md) — crates, módulos, flujos y decisiones.
@@ -103,6 +103,14 @@ demo headless de Node, y un mini-front de navegador con 2 pantallas (ingesta y b
   corre en `spawn_blocking`. La cola sobrevive a reinicios.
 - **Seguridad por token** tipo API-key (opaco, hasheado con SHA-256) con scopes por
   dominio (`Read` / `Write` / `Admin`).
+- **Cifrado en reposo siempre activo**: cada valor se cifra con **XChaCha20-Poly1305**
+  (post-cuántico-seguro) y las claves de índice sensibles (nombres de tags/subdominios,
+  pares clave/valor de metadatos, hashes de contenido) se ofuscan con **HMAC con clave**,
+  así no quedan en claro en disco pero los lookups exactos siguen funcionando. La clave se
+  deriva de una passphrase con **Argon2id**, o, si no se da, es una **clave de máquina**
+  automática protegida por el SO (DPAPI en Windows).
+  El fichero de clave vive **separado de la base de datos** (nunca dentro del backup; se
+  respalda aparte). Las bases sin cifrar de versiones previas se **migran solas** al abrirlas.
 - **Copias de seguridad a nivel de motor**: full (snapshot consistente) y diferencial
   (delta binario, *full-fidelity*), programables (min/horas/días/semanas) con retención, y
   **restore en caliente** (swap del motor). Ver [operación](docs/operacion.md#backups-y-restauración).
@@ -225,6 +233,8 @@ Variables de entorno (con sus valores por defecto):
 | `NUCLEUS_INDEX_DIR`    | `<dir BD>/nucleus_indexes` | Dónde se vuelca/carga el grafo HNSW |
 | `NUCLEUS_GPU`          | `false`              | `true` para inferencia en GPU (requiere build `--features gpu`) |
 | `NUCLEUS_RATE_LIMIT_RPM` | `0` (desactivado)  | Peticiones/min por IP (token-bucket); `0` lo desactiva |
+| `NUCLEUS_PASSPHRASE`   | (vacío)              | Passphrase para el **cifrado en reposo** (siempre activo). Con frase, la clave se deriva con Argon2id (portable, reabre en cualquier máquina). Sin frase, se usa una **clave de máquina** automática protegida por el SO |
+| `NUCLEUS_KEYFILE`      | (config de usuario)  | Ruta del fichero de clave de máquina (solo sin passphrase). Por defecto, un directorio de configuración del usuario **separado de la BD** (`%APPDATA%\Nucleus\nucleus.key` · `~/.config/nucleus/...`). La clave **nunca** se guarda con los datos: respáldala aparte |
 
 Al primer arranque, si no hay tokens, se imprime **una sola vez** un token admin:
 

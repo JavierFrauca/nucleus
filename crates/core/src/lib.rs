@@ -9,6 +9,7 @@ pub mod auth;
 pub mod backup;
 pub mod batch;
 pub mod chunking;
+pub mod crypto;
 pub mod embed;
 pub mod engine;
 pub mod error;
