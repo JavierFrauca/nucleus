@@ -276,7 +276,12 @@ impl Storage {
     /// Write an **encrypted copy** of this (plaintext) database to `dst`: entity
     /// values are sealed, id/index tables are copied verbatim, and a fresh crypto
     /// header is written. `self` must be a plaintext store.
-    fn write_encrypted_copy(&self, dst: &Path, cipher: &Cipher, header: &CryptoHeader) -> Result<()> {
+    fn write_encrypted_copy(
+        &self,
+        dst: &Path,
+        cipher: &Cipher,
+        header: &CryptoHeader,
+    ) -> Result<()> {
         if self.is_encrypted() {
             return Err(NucleusError::crypto(
                 "internal: encrypted-copy source must be a plaintext database",
@@ -596,7 +601,11 @@ impl Storage {
                 let verifier =
                     verifier.ok_or_else(|| NucleusError::crypto("corrupt crypto header"))?;
                 let cipher = Cipher::from_passphrase(pass, &salt, KdfParams::from_bytes(&kdf)?)?;
-                self.verify_key(&cipher, &verifier, "wrong passphrase for encrypted database")?;
+                self.verify_key(
+                    &cipher,
+                    &verifier,
+                    "wrong passphrase for encrypted database",
+                )?;
                 self.cipher = Some(cipher);
                 Ok(())
             }
@@ -605,11 +614,17 @@ impl Storage {
                     verifier.ok_or_else(|| NucleusError::crypto("corrupt crypto header"))?;
                 let key = crate::crypto::load_or_create_machine_key(&resolve_keyfile(keyfile)?)?;
                 let cipher = Cipher::new(&key);
-                self.verify_key(&cipher, &verifier, "machine key does not match this database")?;
+                self.verify_key(
+                    &cipher,
+                    &verifier,
+                    "machine key does not match this database",
+                )?;
                 self.cipher = Some(cipher);
                 Ok(())
             }
-            Some(_) => Err(NucleusError::crypto("unknown encryption mode in crypto header")),
+            Some(_) => Err(NucleusError::crypto(
+                "unknown encryption mode in crypto header",
+            )),
             None => {
                 // No header: a fresh DB (enable encryption now). A legacy plaintext
                 // DB with data is handled earlier by migration, so reaching here
@@ -2501,7 +2516,10 @@ mod tests {
             Err(NucleusError::Crypto(_))
         ));
         // Opening an encrypted DB with no passphrase is refused.
-        assert!(matches!(Storage::open_ephemeral(&path), Err(NucleusError::Crypto(_))));
+        assert!(matches!(
+            Storage::open_ephemeral(&path),
+            Err(NucleusError::Crypto(_))
+        ));
     }
 
     #[test]
@@ -2590,7 +2608,9 @@ mod tests {
         {
             let s = Storage::open_ephemeral(&path).unwrap();
             let dom = s.create_domain("docs", "m", 2).unwrap();
-            let tag = s.create_tag(dom.id, "tag-OPAQUE-aaa", "dn", "", None).unwrap();
+            let tag = s
+                .create_tag(dom.id, "tag-OPAQUE-aaa", "dn", "", None)
+                .unwrap();
             let doc = s
                 .create_document(dom.id, None, "d", None, Default::default(), vec![])
                 .unwrap();
@@ -2603,10 +2623,16 @@ mod tests {
         }
         // The tag name and the metadata value must not appear on disk in the clear.
         assert!(!file_contains(&path, "tag-OPAQUE-aaa"), "tag name leaked");
-        assert!(!file_contains(&path, "alice-OPAQUE-bbb"), "meta value leaked");
+        assert!(
+            !file_contains(&path, "alice-OPAQUE-bbb"),
+            "meta value leaked"
+        );
         // ...yet the keyed lookups still resolve exactly.
         let s = Storage::open_ephemeral(&path).unwrap();
-        assert_eq!(s.tag_id_by_name(dom_id, "tag-OPAQUE-aaa").unwrap(), Some(tag_id));
+        assert_eq!(
+            s.tag_id_by_name(dom_id, "tag-OPAQUE-aaa").unwrap(),
+            Some(tag_id)
+        );
         assert_eq!(
             s.candidates_for_meta("author", "alice-OPAQUE-bbb")
                 .unwrap()
@@ -2663,7 +2689,9 @@ mod tests {
             let s = Storage::open_plaintext(&path).unwrap();
             let dom = s.create_domain("docs", "m", 2).unwrap();
             dom_id = dom.id;
-            let tag = s.create_tag(dom.id, "legacy-tag-CCC", "dn", "", None).unwrap();
+            let tag = s
+                .create_tag(dom.id, "legacy-tag-CCC", "dn", "", None)
+                .unwrap();
             let doc = s
                 .create_document(dom.id, None, "d", None, Default::default(), vec![])
                 .unwrap();
@@ -2671,14 +2699,21 @@ mod tests {
             meta.insert("k".to_string(), "legacy-val-DDD".to_string());
             s.insert_chunk(dom.id, doc.id, None, 0, "x", &[tag.id], meta, &[1.0, 0.0])
                 .unwrap();
-            s.set_document_hash(dom.id, doc.id, "legacyhashEEE").unwrap();
+            s.set_document_hash(dom.id, doc.id, "legacyhashEEE")
+                .unwrap();
         }
         // Opening auto-encrypts AND the v1→v2 migration keyed-hashes the index keys.
         {
             let s = Storage::open_ephemeral(&path).unwrap();
             assert!(s.is_encrypted());
-            assert!(s.tag_id_by_name(dom_id, "legacy-tag-CCC").unwrap().is_some());
-            assert_eq!(s.candidates_for_meta("k", "legacy-val-DDD").unwrap().len(), 1);
+            assert!(s
+                .tag_id_by_name(dom_id, "legacy-tag-CCC")
+                .unwrap()
+                .is_some());
+            assert_eq!(
+                s.candidates_for_meta("k", "legacy-val-DDD").unwrap().len(),
+                1
+            );
             assert!(s
                 .document_id_by_hash(dom_id, "legacyhashEEE")
                 .unwrap()
@@ -2686,6 +2721,9 @@ mod tests {
         }
         assert!(!file_contains(&path, "legacy-tag-CCC"), "tag name leaked");
         assert!(!file_contains(&path, "legacy-val-DDD"), "meta value leaked");
-        assert!(!file_contains(&path, "legacyhashEEE"), "content hash leaked");
+        assert!(
+            !file_contains(&path, "legacyhashEEE"),
+            "content hash leaked"
+        );
     }
 }

@@ -744,11 +744,18 @@ pub unsafe extern "C" fn nucleus_backup(
     let dst = PathBuf::from(&input.dest_path);
     if let Some(parent) = dst.parent().filter(|p| !p.as_os_str().is_empty()) {
         if let Err(e) = std::fs::create_dir_all(parent) {
-            return fail(out_json, NUCLEUS_ERR_ENGINE, format!("create backup dir: {e}"));
+            return fail(
+                out_json,
+                NUCLEUS_ERR_ENGINE,
+                format!("create backup dir: {e}"),
+            );
         }
     }
     match eng.backup_to(&dst) {
-        Ok(()) => ok_json(out_json, json!({ "backed_up": true, "path": input.dest_path })),
+        Ok(()) => ok_json(
+            out_json,
+            json!({ "backed_up": true, "path": input.dest_path }),
+        ),
         Err(e) => fail(out_json, NUCLEUS_ERR_ENGINE, e.to_string()),
     }
 }
@@ -804,7 +811,10 @@ pub unsafe extern "C" fn nucleus_rekey(
         .filter(|s| !s.is_empty())
         .map(PathBuf::from);
     match eng.rekey_to(&dst, passphrase, keyfile.as_deref()) {
-        Ok(()) => ok_json(out_json, json!({ "rekeyed": true, "path": input.dest_path })),
+        Ok(()) => ok_json(
+            out_json,
+            json!({ "rekeyed": true, "path": input.dest_path }),
+        ),
         Err(e) => fail(out_json, NUCLEUS_ERR_ENGINE, e.to_string()),
     }
 }
@@ -1638,8 +1648,7 @@ mod tests {
             call(
                 nucleus_rekey,
                 handle,
-                &json!({ "dest_path": dst.to_string_lossy(), "passphrase": "rk-pass" })
-                    .to_string(),
+                &json!({ "dest_path": dst.to_string_lossy(), "passphrase": "rk-pass" }).to_string(),
             )
         };
         assert_eq!(code, NUCLEUS_OK, "rekey failed: {:?}", last_error_string());

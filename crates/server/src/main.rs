@@ -43,11 +43,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("opening restored database at {}", db_path.display());
     }
 
-    let storage = Storage::open_with_options(
-        &db_path,
-        cfg.passphrase.as_deref(),
-        cfg.keyfile.as_deref(),
-    )?;
+    let storage =
+        Storage::open_with_options(&db_path, cfg.passphrase.as_deref(), cfg.keyfile.as_deref())?;
     if cfg.passphrase.is_some() {
         tracing::info!("encryption at rest: on (XChaCha20-Poly1305, passphrase key)");
     } else {
