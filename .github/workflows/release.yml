@@ -80,6 +80,10 @@ jobs:
     permissions:
       contents: write # create the release and upload assets
     steps:
+      # `gh release create --generate-notes` shells out to `git` to build the
+      # auto-generated notes (diff against the previous tag) — without a checkout
+      # there is no repo here and it fails with "fatal: not a git repository".
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
