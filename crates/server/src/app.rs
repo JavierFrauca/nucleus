@@ -75,6 +75,9 @@ pub struct AppState {
     pub schedule: Arc<RwLock<ScheduleConfig>>,
     /// Per-IP request budget per minute. `0` disables rate limiting.
     pub rate_limit_rpm: u32,
+    /// Trust `X-Forwarded-For` for the rate limiter's client IP (opt-in — only
+    /// safe behind a proxy that overwrites/strips the header from clients).
+    pub trust_proxy: bool,
     /// Passphrase for encryption at rest, if set. Needed to reopen the store on a
     /// restore hot-swap. `None` means the machine key (below) is used.
     pub passphrase: Option<String>,
@@ -170,6 +173,11 @@ pub struct Config {
     pub backup_keep_fulls: usize,
     /// Per-IP request budget per minute. `0` (default) disables rate limiting.
     pub rate_limit_rpm: u32,
+    /// Trust `X-Forwarded-For` for the rate limiter's client IP
+    /// (`NUCLEUS_TRUST_PROXY`). `false` (default) — only enable behind a proxy
+    /// you control that overwrites/strips the header from clients; otherwise a
+    /// client can spoof it to dodge the per-IP budget.
+    pub trust_proxy: bool,
     /// Passphrase for encryption at rest (`NUCLEUS_PASSPHRASE`). `None` (default)
     /// falls back to the machine key.
     pub passphrase: Option<String>,
@@ -273,6 +281,9 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0),
+            trust_proxy: env::var("NUCLEUS_TRUST_PROXY")
+                .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+                .unwrap_or(false),
             passphrase: env::var("NUCLEUS_PASSPHRASE")
                 .ok()
                 .filter(|v| !v.is_empty()),

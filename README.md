@@ -64,6 +64,7 @@ Guías detalladas en [`docs/`](docs/):
 - [Contrato OpenAPI](docs/openapi.yaml) — especificación formal (genera clientes/docs).
 - [Lenguaje de consulta](docs/lenguaje-consulta.md) — el campo `filter`.
 - [Operación](docs/operacion.md) — seguridad, **cifrado en reposo**, jobs, persistencia, memoria, backups.
+- [Compatibilidad de esquema](docs/compatibilidad-esquema.md) — qué versión de Nucleus abre qué BD, y qué migra solo.
 - [Rendimiento y carga](docs/rendimiento.md) — benchmarks reales (throughput, latencia, RAM/CPU, límites).
 - [Instalación y empaquetado](packaging/README.md) — Docker, binario/instalador Windows/Linux.
 - [Arquitectura](docs/arquitectura.md) — crates, módulos, flujos y decisiones.
@@ -214,7 +215,7 @@ crates/
 
 ```bash
 cargo build            # workspace
-cargo test --workspace # 106 tests (core, integración del motor, C-ABI del FFI y e2e HTTP)
+cargo test --workspace # 114 tests (core, integración del motor, C-ABI del FFI y e2e HTTP)
 cargo clippy --workspace --all-targets
 cargo build --features gpu  # opcional: inferencia por GPU (ONNX DirectML)
 
@@ -241,6 +242,7 @@ Variables de entorno (con sus valores por defecto):
 | `NUCLEUS_INDEX_DIR`    | `<dir BD>/nucleus_indexes` | Dónde se vuelca/carga el grafo HNSW |
 | `NUCLEUS_GPU`          | `false`              | `true` para inferencia en GPU (requiere build `--features gpu`) |
 | `NUCLEUS_RATE_LIMIT_RPM` | `0` (desactivado)  | Peticiones/min por IP (token-bucket); `0` lo desactiva |
+| `NUCLEUS_TRUST_PROXY`  | `false`              | `true` para que el rate limit use `X-Forwarded-For` en vez de la IP del peer TCP. Solo si un proxy de confianza sobrescribe esa cabecera — ver [operación](docs/operacion.md#seguridad) |
 | `NUCLEUS_PASSPHRASE`   | (vacío)              | Passphrase para el **cifrado en reposo** (siempre activo). Con frase, la clave se deriva con Argon2id (portable, reabre en cualquier máquina). Sin frase, se usa una **clave de máquina** automática protegida por el SO |
 | `NUCLEUS_KEYFILE`      | (config de usuario)  | Ruta del fichero de clave de máquina (solo sin passphrase). Por defecto, un directorio de configuración del usuario **separado de la BD** (`%APPDATA%\Nucleus\nucleus.key` · `~/.config/nucleus/...`). La clave **nunca** se guarda con los datos: respáldala aparte |
 

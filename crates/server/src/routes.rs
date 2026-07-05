@@ -57,6 +57,7 @@ fn resolve_structure(
 /// Build the application router.
 pub fn router(state: AppState) -> Router {
     let rate_limit_rpm = state.rate_limit_rpm;
+    let trust_proxy = state.trust_proxy;
     let app = Router::new()
         .route("/healthz", get(health))
         .route("/readyz", get(readyz))
@@ -96,7 +97,7 @@ pub fn router(state: AppState) -> Router {
     let app = if rate_limit_rpm > 0 {
         let limiter = std::sync::Arc::new(crate::rate_limit::RateLimit::new(rate_limit_rpm));
         app.layer(axum::middleware::from_fn(move |req, next| {
-            crate::rate_limit::enforce(limiter.clone(), req, next)
+            crate::rate_limit::enforce(limiter.clone(), trust_proxy, req, next)
         }))
     } else {
         app
@@ -1071,6 +1072,10 @@ mod tests {
     }
 
     fn harness_rpm(rate_limit_rpm: u32) -> (Harness, tempfile::TempDir) {
+        harness_rpm_proxy(rate_limit_rpm, false)
+    }
+
+    fn harness_rpm_proxy(rate_limit_rpm: u32, trust_proxy: bool) -> (Harness, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         // Hermetic: keep the machine key file inside the tempdir.
         let keyfile = dir.path().join("n.key");
@@ -1104,6 +1109,7 @@ mod tests {
                 keep_fulls: 7,
             })),
             rate_limit_rpm,
+            trust_proxy,
             passphrase: None,
             keyfile: Some(keyfile.clone()),
         };
@@ -1317,6 +1323,304 @@ mod tests {
         assert!(none.as_array().unwrap().is_empty());
     }
 
+    /// Matrix over `Perm`/`DomainScope` combinations: every endpoint category
+    /// (admin-only, domain-scoped Read, domain-scoped Write) rejects a token that
+    /// lacks the right permission or the right domain with 403 — not just the
+    /// happy path and the unauthenticated 401 (already covered above).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scope_matrix_rejects_insufficient_or_wrong_domain_tokens() {
+        let (h, _dir) = harness();
+
+        // Two domains owned by the admin token, to test cross-domain scoping.
+        let (_, dom1) = call(
+            &h.app,
+            "POST",
+            "/v1/domains",
+            &h.token,
+            json!({"name":"one"}),
+        )
+        .await;
+        let domain1 = dom1["id"].as_u64().unwrap();
+        let (_, dom2) = call(
+            &h.app,
+            "POST",
+            "/v1/domains",
+            &h.token,
+            json!({"name":"two"}),
+        )
+        .await;
+        let domain2 = dom2["id"].as_u64().unwrap();
+
+        // A token that can only Read domain1.
+        let (_, t) = call(
+            &h.app,
+            "POST",
+            "/v1/tokens",
+            &h.token,
+            json!({"name":"reader","scopes":[{"domain":{"One":domain1},"perm":"Read"}]}),
+        )
+        .await;
+        let reader = t["token"].as_str().unwrap().to_string();
+
+        // A token that can Write domain1 (but not domain2, and isn't a global admin).
+        let (_, t) = call(
+            &h.app,
+            "POST",
+            "/v1/tokens",
+            &h.token,
+            json!({"name":"writer","scopes":[{"domain":{"One":domain1},"perm":"Write"}]}),
+        )
+        .await;
+        let writer = t["token"].as_str().unwrap().to_string();
+
+        // A token that is Admin over domain1 only — not a *global* admin.
+        let (_, t) = call(
+            &h.app,
+            "POST",
+            "/v1/tokens",
+            &h.token,
+            json!({"name":"domain-admin","scopes":[{"domain":{"One":domain1},"perm":"Admin"}]}),
+        )
+        .await;
+        let domain_admin = t["token"].as_str().unwrap().to_string();
+
+        // --- Read is enough to GET the domain, not to write to it -----------
+        let (status, _) = call(
+            &h.app,
+            "GET",
+            &format!("/v1/domains/{domain1}"),
+            &reader,
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "Read scope allows GET");
+
+        let (status, _) = call(
+            &h.app,
+            "POST",
+            &format!("/v1/domains/{domain1}/documents"),
+            &reader,
+            json!({"title":"x","chunks":["x"]}),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "Read scope must not allow ingest (Write)"
+        );
+
+        // --- Write on domain1 works there, but not on domain2 ----------------
+        let (status, _) = call(
+            &h.app,
+            "POST",
+            &format!("/v1/domains/{domain1}/tags"),
+            &writer,
+            json!({"name":"ok"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "Write scope allows tag creation");
+
+        let (status, _) = call(
+            &h.app,
+            "POST",
+            &format!("/v1/domains/{domain2}/tags"),
+            &writer,
+            json!({"name":"nope"}),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "Write scope on domain1 must not leak into domain2"
+        );
+
+        // --- Write rank is enough to also Read (rank Read < Write) -----------
+        let (status, _) = call(
+            &h.app,
+            "GET",
+            &format!("/v1/domains/{domain1}"),
+            &writer,
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "Write scope subsumes Read");
+
+        // --- Domain-scoped Admin is not a *global* admin ----------------------
+        // Per-domain Admin passes the domain-scoped Write check...
+        let (status, _) = call(
+            &h.app,
+            "POST",
+            &format!("/v1/domains/{domain1}/tags"),
+            &domain_admin,
+            json!({"name":"also-ok"}),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "domain-scoped Admin still satisfies Write on its own domain"
+        );
+        // ...but global-admin-only endpoints (create_domain, tokens) require
+        // `DomainScope::All`, not just `Perm::Admin` on one domain.
+        let (status, _) = call(
+            &h.app,
+            "POST",
+            "/v1/domains",
+            &domain_admin,
+            json!({"name":"should-fail"}),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "per-domain Admin must not be able to create new domains"
+        );
+        let (status, _) = call(&h.app, "GET", "/v1/tokens", &domain_admin, json!({})).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "per-domain Admin must not be able to list tokens"
+        );
+
+        // --- Non-admin tokens can't touch admin-only maintenance endpoints ----
+        let (status, _) = call(
+            &h.app,
+            "POST",
+            "/v1/maintenance/persist",
+            &writer,
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = call(&h.app, "POST", "/v1/backups", &reader, json!({})).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = call(&h.app, "DELETE", "/v1/tokens/999", &writer, json!({})).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    /// CI-friendly proxy for `docs/rendimiento.md`'s manual load test: same
+    /// property (search under concurrency must agree with a sequential
+    /// baseline), but against the in-process `MockEmbedder` harness instead of
+    /// the real binary + embedding model, so it runs in `cargo test --workspace`
+    /// on every platform with no network/model dependency.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_search_matches_sequential_baseline() {
+        let (h, _dir) = harness();
+
+        let (status, dom) = call(
+            &h.app,
+            "POST",
+            "/v1/domains",
+            &h.token,
+            json!({"name":"load"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let domain_id = dom["id"].as_u64().unwrap();
+
+        // One document per keyword, each keyword otherwise unique so the mock
+        // bag-of-words embedder makes its own document an unambiguous top-1.
+        const KEYWORDS: [&str; 8] = [
+            "alfa", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel",
+        ];
+        for kw in KEYWORDS {
+            let (status, ing) = call(
+                &h.app,
+                "POST",
+                &format!("/v1/domains/{domain_id}/documents"),
+                &h.token,
+                json!({"title": kw, "chunks": [format!("documento sobre {kw} único")]}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let job_id = ing["job_id"].as_u64().unwrap();
+            let mut done = false;
+            for _ in 0..200 {
+                let (_, job) = call(
+                    &h.app,
+                    "GET",
+                    &format!("/v1/jobs/{job_id}"),
+                    &h.token,
+                    json!({}),
+                )
+                .await;
+                if job["status"] == "Done" {
+                    done = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            assert!(done, "ingest of '{kw}' never completed");
+        }
+
+        // Sequential baseline: record each keyword's top-1 document id.
+        let mut baseline = std::collections::HashMap::new();
+        for kw in KEYWORDS {
+            let (status, hits) = call(
+                &h.app,
+                "POST",
+                &format!("/v1/domains/{domain_id}/search"),
+                &h.token,
+                json!({"query": kw, "k": 1}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let arr = hits.as_array().unwrap();
+            assert!(
+                !arr.is_empty(),
+                "baseline search for '{kw}' returned nothing"
+            );
+            baseline.insert(kw, arr[0]["document_id"].as_u64().unwrap());
+        }
+
+        // Concurrent phase: many workers hammering the same searches at once.
+        const WORKERS: usize = 16;
+        const ROUNDS_PER_WORKER: usize = 10;
+        let mut tasks = Vec::with_capacity(WORKERS);
+        for w in 0..WORKERS {
+            let app = h.app.clone();
+            let token = h.token.clone();
+            tasks.push(tokio::spawn(async move {
+                let mut results = Vec::with_capacity(ROUNDS_PER_WORKER);
+                for r in 0..ROUNDS_PER_WORKER {
+                    let kw = KEYWORDS[(w + r) % KEYWORDS.len()];
+                    let (status, hits) = call(
+                        &app,
+                        "POST",
+                        &format!("/v1/domains/{domain_id}/search"),
+                        &token,
+                        json!({"query": kw, "k": 1}),
+                    )
+                    .await;
+                    let top1 = hits
+                        .as_array()
+                        .and_then(|a| a.first())
+                        .and_then(|h| h["document_id"].as_u64());
+                    results.push((kw, status, top1));
+                }
+                results
+            }));
+        }
+
+        let mut total = 0;
+        for task in tasks {
+            for (kw, status, top1) in task.await.expect("worker task panicked") {
+                total += 1;
+                assert_eq!(
+                    status,
+                    StatusCode::OK,
+                    "search for '{kw}' failed under concurrency"
+                );
+                assert_eq!(
+                    top1,
+                    Some(baseline[kw]),
+                    "search for '{kw}' returned a different top-1 under concurrency than sequentially"
+                );
+            }
+        }
+        assert_eq!(total, WORKERS * ROUNDS_PER_WORKER);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn rate_limit_sheds_over_budget() {
         // Burst of 3/min per IP; the test peer is unspecified (shared bucket).
@@ -1340,6 +1644,49 @@ mod tests {
             statuses.contains(&StatusCode::TOO_MANY_REQUESTS),
             "a flood past the budget must yield 429s, got {statuses:?}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn xff_spoofing_ignored_without_trust_proxy() {
+        // Burst of 2/min; every request in this test shares the same (unspecified)
+        // bucket because there's no real peer in-process and trust_proxy is off —
+        // a spoofed X-Forwarded-For must NOT grant each request its own budget.
+        let (h, _dir) = harness_rpm(2);
+        let mut statuses = Vec::new();
+        for i in 0..4 {
+            let req = Request::builder()
+                .method("GET")
+                .uri("/healthz")
+                .header("x-forwarded-for", format!("203.0.113.{i}"))
+                .body(Body::empty())
+                .unwrap();
+            statuses.push(h.app.clone().oneshot(req).await.unwrap().status());
+        }
+        assert!(
+            statuses.contains(&StatusCode::TOO_MANY_REQUESTS),
+            "spoofed per-request IPs must not each get their own budget: {statuses:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn xff_grants_independent_budgets_when_trusted() {
+        // Same burst of 2/min, but now with trust_proxy on: distinct
+        // X-Forwarded-For values must get independent buckets.
+        let (h, _dir) = harness_rpm_proxy(2, true);
+        for i in 0..2 {
+            let req = Request::builder()
+                .method("GET")
+                .uri("/healthz")
+                .header("x-forwarded-for", format!("203.0.113.{i}"))
+                .body(Body::empty())
+                .unwrap();
+            let status = h.app.clone().oneshot(req).await.unwrap().status();
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "each distinct IP starts with a fresh budget"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

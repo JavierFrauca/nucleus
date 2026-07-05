@@ -24,8 +24,21 @@ Con ese token admin, crea tokens con menos privilegios para tus aplicaciones (ve
 - **Expón Nucleus tras TLS** (reverse proxy: nginx/Caddy/Traefik). El servidor habla
   HTTP plano; no pongas `NUCLEUS_ADDR` en una interfaz pública sin TLS por delante.
 - Limita el acceso de red al puerto; el `admin` puede crear dominios y tokens.
+- **Rate limiting por IP** (`NUCLEUS_RATE_LIMIT_RPM`, token-bucket, `0` desactivado):
+  por defecto limita por la **IP del peer directo** de la conexión TCP. Si Nucleus
+  corre tras un reverse proxy (nginx/Caddy/Traefik/etc.), esa IP es la del proxy, no
+  la del cliente real, y todo el tráfico comparte un único presupuesto. Activa
+  `NUCLEUS_TRUST_PROXY=true` **solo si el proxy sobrescribe/elimina** la cabecera
+  `X-Forwarded-For` de las peticiones entrantes de los clientes (para que no puedan
+  falsificarla) — con eso, el límite pasa a aplicarse por la IP real de cada
+  cliente (la primera de la cabecera). Sin un proxy de confianza delante, déjalo en
+  `false` (por defecto): confiar en la cabecera sin filtrarla permite a cualquier
+  cliente saltarse su presupuesto cambiándola en cada petición.
 
 ## Cifrado en reposo
+
+> Qué versión de Nucleus puede abrir qué base de datos (y qué migra sola al abrirla) se
+> documenta aparte en [compatibilidad de esquema](compatibilidad-esquema.md).
 
 El cifrado en reposo está **siempre activo**: no existe modo sin cifrar. Cada valor
 se cifra con **XChaCha20-Poly1305** (AEAD simétrico, post-cuántico-seguro: Grover solo

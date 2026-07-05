@@ -162,6 +162,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         data_dir,
         schedule,
         rate_limit_rpm: cfg.rate_limit_rpm,
+        trust_proxy: cfg.trust_proxy,
         passphrase: cfg.passphrase.clone(),
         keyfile: cfg.keyfile.clone(),
     };
