@@ -29,12 +29,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Windows x64 is the 1.0 target. Linux + macOS are exercised to validate the
-        # non-Windows code paths (machine-key 0600 fallback, XDG/HOME default paths,
-        # SIGTERM) and to confirm `ort` downloads ONNX Runtime per platform — the main
-        # unknown for shipping the .so/.dylib later. macos-latest is Apple Silicon
-        # (arm64); macos-13 is Intel (x64).
-        os: [ubuntu-latest, windows-latest, macos-latest, macos-13]
+        # 1.0 target platforms: Windows x64, Linux x64, macOS arm64 (Apple Silicon).
+        # macOS Intel (macos-13) is intentionally excluded — GitHub no longer
+        # schedules runners for that label (jobs hang 24h "awaiting a runner");
+        # Linux/macOS are exercised to validate the non-Windows code paths
+        # (machine-key 0600 fallback, XDG/HOME default paths, SIGTERM) and to
+        # confirm `ort` downloads ONNX Runtime per platform.
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -54,7 +55,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest, macos-13]
+        # Same rationale as the `test` matrix above: no macos-13 (Intel) runner.
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

@@ -1,8 +1,16 @@
 # Nucleus — packaging & installation
 
-Ways to deploy the Nucleus server so other projects can consume it over HTTP.
-For embedding the engine directly in a Rust project, use the
-[`nucleus-core`](../crates/core/README.md) crate instead.
+Ways to deploy the Nucleus **server** (HTTP mode) so other projects can consume it over
+the network. For **embedding** the engine directly in an app (the product's focus —
+`nucleus.dll` / `libnucleus.so` / `libnucleus.dylib`, no HTTP), see
+[Modo embebido en el README](../README.md#modo-embebido-dll) and `build-dll.ps1` /
+`build-lib.sh` below instead of the options in this file.
+
+> **Platform coverage differs by mode.** The **embedded** bundles (`build-dll.ps1` /
+> `build-lib.sh`) ship for Windows x64, Linux x64 and macOS arm64. The **server**
+> bundles below (Options B/C) currently only exist for **Windows and Linux** — there is
+> no macOS server bundle / `launchd` unit yet (see
+> [camino a la 1.0](../docs/camino-a-1.0.md)).
 
 > **ONNX Runtime:** the server runs embeddings in-process via ONNX Runtime. The
 > native library (`onnxruntime.dll` on Windows, `libonnxruntime.so` on Linux) is
@@ -63,6 +71,24 @@ sudo cat /var/lib/nucleus/admin_token.txt   # bootstrap admin token (once)
 The unit sets `LD_LIBRARY_PATH=/opt/nucleus` so ONNX Runtime is found next to the
 binary. Adjust paths/port via the `Environment=` lines in
 [`nucleus.service`](nucleus.service).
+
+## Option D — embedded mode (DLL / so / dylib)
+
+For in-process embedding (no HTTP, no server binary), build the shared library
+directly instead of the server bundles above:
+
+```powershell
+pwsh packaging/build-dll.ps1 -Version 0.1.0        # -> dist/nucleus-dll-0.1.0-windows-x64.zip
+```
+
+```bash
+packaging/build-lib.sh 0.1.0                       # -> dist/nucleus-lib-0.1.0-<os>-<arch>.tar.gz
+                                                    #    (linux-x64 or macos-arm64)
+```
+
+Both bundle `nucleus.h`, the C# P/Invoke binding, and a README; the Unix one also
+bundles the ONNX Runtime shared library if it wasn't linked statically. See
+[Modo embebido en el README](../README.md#modo-embebido-dll) for the API and usage.
 
 ## Configuration
 

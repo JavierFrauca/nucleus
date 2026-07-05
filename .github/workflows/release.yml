@@ -46,8 +46,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # linux x64, macOS arm64 (Apple Silicon) and macOS x64 (Intel).
-        os: [ubuntu-latest, macos-latest, macos-13]
+        # linux x64 and macOS arm64 (Apple Silicon). macOS Intel (macos-13) is
+        # intentionally out of scope — GitHub no longer schedules runners for
+        # that label, which previously hung `unix-bundle` for 24h and blocked
+        # `publish` (it needs every matrix member of this job to succeed).
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

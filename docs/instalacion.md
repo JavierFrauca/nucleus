@@ -54,7 +54,7 @@ cargo build
 Verificación de la build (tests + linter):
 
 ```bash
-cargo test --workspace           # ~36 tests (core + e2e HTTP con un embedder mock)
+cargo test --workspace           # 106 tests (core + integración del motor + C-ABI del FFI + e2e HTTP)
 cargo clippy --workspace --all-targets
 ```
 

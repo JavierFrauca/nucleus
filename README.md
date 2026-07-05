@@ -1,16 +1,18 @@
 # Nucleus
 
 [![Release](https://img.shields.io/github/v/release/JavierFrauca/nucleus?sort=semver)](https://github.com/JavierFrauca/nucleus/releases/latest)
-[![Descargar DLL](https://img.shields.io/badge/descargar-nucleus.dll%20(win--x64)-blue)](https://github.com/JavierFrauca/nucleus/releases/latest)
+[![Descargar](https://img.shields.io/badge/descargar-windows%20%C2%B7%20linux%20%C2%B7%20macOS%20arm64-blue)](https://github.com/JavierFrauca/nucleus/releases/latest)
 
 **Base de datos ad-hoc para RAG, embebible en tu aplicación.** Escrita en Rust.
 Nucleus es un motor todo-en-uno: almacena, indexa y **genera los embeddings en
 proceso**.
 
 > **Cambio de rumbo (2026-06):** el foco de Nucleus es ahora el **modo embebido** —
-> una base de datos vectorial *ad-hoc* que tu app referencia como **DLL nativa**
-> (`nucleus.dll`, **Windows x64**), sin red, sin sidecar, sin servicio que desplegar:
-> «SQLite, pero para RAG con embeddings dentro». El servidor HTTP sigue existiendo como
+> una base de datos vectorial *ad-hoc* que tu app referencia como **librería nativa**
+> (`nucleus.dll` / `libnucleus.so` / `libnucleus.dylib`), sin red, sin sidecar, sin
+> servicio que desplegar: «SQLite, pero para RAG con embeddings dentro». Disponible para
+> **Windows x64, Linux x64 y macOS arm64** (Apple Silicon; macOS Intel no se soporta —
+> ver [camino a la 1.0](docs/camino-a-1.0.md)). El servidor HTTP sigue existiendo como
 > **segundo modo** para despliegues cliente-servidor.
 
 ## Dos modos, un mismo motor
@@ -35,16 +37,20 @@ lenguaje de consulta para filtros ricos.
 
 ## Descargar
 
-El bundle del **modo embebido** (Windows x64) está disponible en
-[**Releases**](https://github.com/JavierFrauca/nucleus/releases/latest):
+Los bundles del **modo embebido** están disponibles en
+[**Releases**](https://github.com/JavierFrauca/nucleus/releases/latest) para **Windows x64**,
+**Linux x64** y **macOS arm64** (Apple Silicon):
 
-- **[nucleus-dll-0.1.2-windows-x64.zip](https://github.com/JavierFrauca/nucleus/releases/download/v0.1.2/nucleus-dll-0.1.2-windows-x64.zip)** (~11 MB) — `nucleus.dll` autocontenida + import lib + header C [`nucleus.h`](crates/ffi/include/nucleus.h) + binding C# tipado + README.
+- **`nucleus-dll-<versión>-windows-x64.zip`** (~11 MB) — `nucleus.dll` autocontenida + import
+  lib + header C [`nucleus.h`](crates/ffi/include/nucleus.h) + binding C# tipado + README. En
+  Windows la DLL es autocontenida (ONNX Runtime enlazado estático).
+- **`nucleus-lib-<versión>-linux-x64.tar.gz`** / **`nucleus-lib-<versión>-macos-arm64.tar.gz`** —
+  `libnucleus.so` / `libnucleus.dylib` + header C + binding C#, con ONNX Runtime empaquetado al
+  lado si no se enlazó estático.
 
-Suelta `nucleus.dll` junto a tu ejecutable y referencia el binding C# (o usa el C ABI
-desde C/C++). En Windows la DLL es autocontenida (ONNX Runtime enlazado estático); la
-primera ingesta descarga el modelo de embeddings (~450 MB). Para compilar desde fuente
-o regenerar el bundle, ver [requisitos de build](#requisitos-de-build) y
-`packaging/build-dll.ps1`.
+En todas, la primera ingesta descarga el modelo de embeddings (~450 MB). Para compilar desde
+fuente o regenerar los bundles, ver [requisitos de build](#requisitos-de-build) y
+`packaging/build-dll.ps1` (Windows) / `packaging/build-lib.sh` (Linux/macOS).
 
 ## Documentación
 
@@ -118,11 +124,13 @@ demo headless de Node, y un mini-front de navegador con 2 pantallas (ingesta y b
 
 ## Modo embebido (DLL)
 
-El modo **prioritario**: Nucleus dentro de tu proceso, sin HTTP. Tu app enlaza
-`nucleus.dll` y llama al motor directamente. **Se distribuye solo para Windows x64**
-(otras plataformas, más adelante). En Windows la DLL es **autocontenida** (~28 MB): `ort`/ONNX Runtime se
-enlaza **estáticamente**, así que no hay que repartir `onnxruntime.dll`. Lo único que
-se descarga la primera vez es el modelo de embeddings (~450 MB).
+El modo **prioritario**: Nucleus dentro de tu proceso, sin HTTP. Tu app enlaza la librería
+nativa (`nucleus.dll` / `libnucleus.so` / `libnucleus.dylib`) y llama al motor directamente.
+**Se distribuye para Windows x64, Linux x64 y macOS arm64** (Apple Silicon; macOS Intel no se
+soporta). En Windows la DLL es **autocontenida** (~28 MB): `ort`/ONNX Runtime se enlaza
+**estáticamente**, así que no hay que repartir `onnxruntime.dll`. En Linux/macOS el bundle
+incluye la librería de ONNX Runtime al lado si no quedó enlazada estática. Lo único que se
+descarga la primera vez (en cualquier plataforma) es el modelo de embeddings (~450 MB).
 
 - **Crate**: [`crates/ffi`](crates/ffi) (`nucleus-ffi`, `crate-type = ["cdylib"]`).
 - **C ABI**: handle opaco + borde **JSON** (entrada/salida son strings JSON; código
@@ -206,7 +214,7 @@ crates/
 
 ```bash
 cargo build            # workspace
-cargo test --workspace # 85 tests (core, integración del motor, C-ABI del FFI y e2e HTTP)
+cargo test --workspace # 106 tests (core, integración del motor, C-ABI del FFI y e2e HTTP)
 cargo clippy --workspace --all-targets
 cargo build --features gpu  # opcional: inferencia por GPU (ONNX DirectML)
 
