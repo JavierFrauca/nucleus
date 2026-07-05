@@ -7,13 +7,18 @@
 Nucleus es un motor todo-en-uno: almacena, indexa y **genera los embeddings en
 proceso**.
 
+> **1.0.0 — API estable.** Desde esta versión, la API HTTP y el C-ABI del FFI siguen
+> [SemVer](https://semver.org/): un cambio incompatible exige un major. Ver el
+> compromiso exacto (qué cuenta como *breaking* y qué no) en
+> [camino a la 1.0](docs/camino-a-1.0.md#compromiso-de-estabilidad-semver-desde-100).
+
 > **Cambio de rumbo (2026-06):** el foco de Nucleus es ahora el **modo embebido** —
 > una base de datos vectorial *ad-hoc* que tu app referencia como **librería nativa**
 > (`nucleus.dll` / `libnucleus.so` / `libnucleus.dylib`), sin red, sin sidecar, sin
 > servicio que desplegar: «SQLite, pero para RAG con embeddings dentro». Disponible para
-> **Windows x64, Linux x64 y macOS arm64** (Apple Silicon; macOS Intel no se soporta —
-> ver [camino a la 1.0](docs/camino-a-1.0.md)). El servidor HTTP sigue existiendo como
-> **segundo modo** para despliegues cliente-servidor.
+> **Windows x64, Linux x64 y macOS arm64** (Apple Silicon; macOS Intel no se soporta).
+> El servidor HTTP sigue existiendo como **segundo modo** para despliegues
+> cliente-servidor.
 
 ## Dos modos, un mismo motor
 
@@ -70,7 +75,7 @@ Guías detalladas en [`docs/`](docs/):
 - [Arquitectura](docs/arquitectura.md) — crates, módulos, flujos y decisiones.
 - [Dossier técnico](docs/dossier-tecnico.md) — guía completa de defensa: decisiones, alternativas, límites y preguntas difíciles.
 - [Resumen de defensa](docs/resumen-defensa.md) — one-pager para imprimir · [diagrama](docs/arquitectura.svg).
-- [Camino a la 1.0](docs/camino-a-1.0.md) — checklist priorizada de lo que falta para estable/production-ready.
+- [Camino a la 1.0](docs/camino-a-1.0.md) — historial de cómo se llegó a 1.0.0 y el compromiso de estabilidad (SemVer) vigente desde esa versión.
 
 ## Clientes / SDKs
 

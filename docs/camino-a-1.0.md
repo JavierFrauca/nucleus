@@ -1,80 +1,82 @@
-# Camino a la 1.0
+# Camino a la 1.0 → 1.0.0 alcanzada
 
-Checklist priorizada para que Nucleus pueda anunciarse como **estable / production-ready**
-sin asteriscos. Marca lo hecho y lo que falta; al final, las decisiones que dependen de ti.
+> **Estado: 1.0.0.** Este documento fue la checklist para llegar aquí; se conserva como
+> historial de cómo se llegó y ahora también fija el **compromiso de estabilidad** que
+> `1.0.0` implica. Para nuevas features, ver el README y `docs/`; para bugs, los issues
+> de GitHub.
 
-## Estado actual (v0.2.0)
+## Compromiso de estabilidad (SemVer desde 1.0.0)
+
+Nucleus sigue [SemVer](https://semver.org/). A partir de `1.0.0`, lo que sigue es un
+**contrato**, no una intención — un cambio que lo rompa exige un major (`2.0.0`):
+
+- **API HTTP** (`docs/api.md`, `docs/openapi.yaml`): rutas, campos de petición/respuesta
+  y códigos de estado documentados. Romper esto es: quitar/renombrar un endpoint o un
+  campo, cambiar el tipo de un campo, o cambiar un comportamiento por defecto del que
+  un cliente ya dependa. **No** rompe: añadir un endpoint nuevo, añadir un campo
+  opcional, mejorar el ranking/latencia sin cambiar la forma de la respuesta.
+- **C-ABI del FFI** (`crates/ffi/include/nucleus.h`): firmas de las funciones `extern
+  "C"` existentes. Romper esto es cambiar la firma de una función ya publicada.
+  Añadir funciones nuevas no rompe nada.
+- **Compatibilidad de esquema de BD**: cubierta aparte y con su propio contrato en
+  [`compatibilidad-esquema.md`](compatibilidad-esquema.md) (qué `SCHEMA_VERSION` migra
+  solo y qué no) — independiente del SemVer de la API, pero igual de vinculante.
+
+**Explícitamente fuera del contrato SemVer** (pueden cambiar en cualquier `1.x`):
+
+- El crate `nucleus-core` como API de Rust: es un **crate interno del workspace, no
+  publicado en crates.io**. Quien lo use directamente (en vez de vía HTTP o FFI) asume
+  que su superficie pública puede moverse entre minors.
+- Características de rendimiento (throughput, latencias, uso de RAM) — mejoran con el
+  tiempo pero no son una garantía numérica.
+- Cualquier cosa marcada explícitamente como experimental en el README o los docs.
+
+## Cómo se llegó aquí (histórico)
+
+### Estado en el momento del bump (v0.2.0 → v1.0.0)
 
 - ✅ **114 tests** en verde (78 motor + 6 integración del motor + 15 C-ABI del FFI [1 ignorado,
   descarga el modelo] + 15 e2e HTTP) + clippy `-D warnings` + `cargo fmt --check`.
-- ✅ Hardening del servidor: auth por token con scopes, dedup por hash, apagado ordenado con
-  volcado de índices, versionado de esquema con gate de migración, `/healthz` + `/readyz` +
-  `/metrics`, CORS opt-in, listados paginados, **rate limiting por IP** (token-bucket,
-  `NUCLEUS_RATE_LIMIT_RPM`), Docker.
+- ✅ Hardening del servidor: auth por token con scopes (con matriz de tests 403), dedup por
+  hash, apagado ordenado con volcado de índices, versionado de esquema con gate de migración,
+  `/healthz` + `/readyz` + `/metrics`, CORS opt-in, listados paginados, rate limiting por IP
+  (token-bucket, opt-in a `X-Forwarded-For` tras proxy de confianza), Docker.
 - ✅ **Cifrado en reposo siempre activo** (XChaCha20-Poly1305 + HMAC de índices, Argon2id o clave
   de máquina con DPAPI en Windows), con migración automática de bases antiguas sin cifrar.
-- ✅ **CI multiplataforma**: lint en Linux + tests y build del cdylib en Linux x64, Windows x64 y
-  macOS arm64.
-- ✅ Modo embebido (DLL/so/dylib) con su binding C#; modo servidor (HTTP) con axum.
-- ✅ Empaquetado embebido para las 3 plataformas soportadas: `build-dll.ps1` (Windows),
-  `build-lib.sh` (Linux/macOS).
+- ✅ **CI multiplataforma**: lint en Linux + tests, build del cdylib y smoke de carga
+  (concurrencia vs. baseline secuencial) en Linux x64, Windows x64 y macOS arm64.
+- ✅ Modo embebido (DLL/so/dylib) con su binding C#, empaquetado en las 3 plataformas; modo
+  servidor (HTTP) con axum, empaquetado en Windows y Linux.
+- ✅ Guía de compatibilidad de esquema entre versiones.
 
-## Alcance decidido (2026-07)
+### Alcance de plataformas (decidido 2026-07, vigente en 1.0.0)
 
-- **Plataformas de la 1.0: Windows x64, Linux x64 y macOS arm64 (Apple Silicon).** macOS Intel
-  (x64) queda **fuera de alcance**: GitHub ya no programa runners para la etiqueta `macos-13`
-  (los jobs colgaban 24h "awaiting a runner" y bloqueaban `publish`), y no hay demanda que
-  justifique un runner self-hosted para ello. Si en el futuro se necesita, requeriría una imagen
-  self-hosted o un runner de terceros.
-- El modo **embebido** (DLL/so/dylib) es el que se empaqueta y publica en las 3 plataformas. El
-  modo **servidor** (`nucleus-server` binario) solo tiene bundle reproducible para Windows y
-  Linux hoy; un bundle de servidor para macOS (+ unidad `launchd`) queda para más adelante si se
-  necesita.
-- **Versionado: seguimos en `0.x`** por ahora (sin congelar API). El bump a `1.0.0` se valorará más
-  adelante; mientras tanto `0.x` permite iterar la API sin coste SemVer.
+- **Windows x64, Linux x64 y macOS arm64 (Apple Silicon).** macOS Intel (x64) queda fuera de
+  alcance: GitHub ya no programa runners para `macos-13`. Revisar si aparece demanda real.
+- El modo **embebido** se empaqueta y publica en las 3 plataformas. El modo **servidor**
+  solo tiene bundle reproducible para Windows y Linux; un bundle de servidor para macOS
+  (+ unidad `launchd`) queda para más adelante si se necesita.
 
-## Bloqueantes para 1.0 (must)
+### Bloqueantes resueltos antes del bump
 
-1. ~~Verificar la matriz de CI en verde (Linux + Windows).~~ **Resuelto.** La matriz sí se
-   ejecutó, pero `macos-13` (Intel) colgaba 24h por falta de runner y cancelaba la ejecución
-   completa — es la causa real por la que no se veía "verde". Se ha quitado `macos-13` de
-   `ci.yml` y `release.yml`; con `[ubuntu-latest, windows-latest, macos-latest]` la matriz
-   compila, testea y empaqueta sin bloqueos.
-2. ✅ **Bundle de Windows pulido**: `packaging/build-dll.ps1` y el `.zip` de release son
-   reproducibles, con `nucleus.h`, import lib, binding C# y README actualizado.
-3. ✅ **Bundles de Linux/macOS**: `packaging/build-lib.sh` produce el `.tar.gz` embebido
-   (`libnucleus.so`/`.dylib` + header + binding C#) para Linux x64 y macOS arm64, smoke-testado
-   en cada run de CI.
+1. ✅ CI en verde en las 3 plataformas (el bloqueo real era `macos-13` sin runner disponible,
+   no un fallo de compilación — corregido quitándolo de las matrices).
+2. ✅ Bundle de Windows reproducible (`packaging/build-dll.ps1`).
+3. ✅ Bundles de Linux/macOS reproducibles (`packaging/build-lib.sh`).
+4. ✅ Tests HTTP de autorización (matriz de scopes, no solo camino feliz + 401).
+5. ✅ Rate limit tras proxy (`NUCLEUS_TRUST_PROXY`, opt-in).
+6. ✅ Smoke de carga/concurrencia en CI (`concurrent_search_matches_sequential_baseline`).
+7. ✅ Guía de compatibilidad de esquema (`compatibilidad-esquema.md`).
 
-## Recomendado antes de presumir de "production" (should)
-
-Los 4 puntos de esta sección están **resueltos**:
-
-4. ✅ **Tests HTTP de autorización**: `scope_matrix_rejects_insufficient_or_wrong_domain_tokens`
-   en `crates/server/src/routes.rs` cubre Read/Write/Admin, `DomainScope::One` vs `All`, y que un
-   Admin de un solo dominio no cuela como admin global — no solo el camino feliz y el 401.
-5. ✅ **Rate limit tras proxy**: `NUCLEUS_TRUST_PROXY` (opt-in, `false` por defecto) hace que
-   `client_ip()` en `crates/server/src/rate_limit.rs` use `X-Forwarded-For` en vez de la IP del
-   peer TCP — solo si el proxy sobrescribe esa cabecera. Documentado en
-   [operación](operacion.md#seguridad).
-6. ✅ **Smoke de carga/concurrencia en CI**: `concurrent_search_matches_sequential_baseline` en
-   `routes.rs` compara el top-1 de cada búsqueda bajo concurrencia (16 workers) contra una
-   baseline secuencial, usando `MockEmbedder` — sin descargar el modelo real, corre en
-   `cargo test --workspace` en las 3 plataformas. El benchmark real y manual
-   (`scripts/loadtest.mjs`, contra el binario + modelo real) sigue existiendo aparte para medir
-   números reales de `rendimiento.md`.
-7. ✅ **Guía de compatibilidad de esquema**: [`docs/compatibilidad-esquema.md`](compatibilidad-esquema.md)
-   documenta qué `SCHEMA_VERSION` usa cada release, qué migra sola (v1 plaintext → v2 cifrada) y
-   qué no (una BD por debajo del `SCHEMA_VERSION` soportado que ya esté cifrada — hoy no ocurre en
-   ningún release oficial, pero el motor lo rechaza explícitamente en vez de arriesgarse).
-
-## Futuro (post-1.0)
+## Futuro (post-1.0.0)
 
 - **macOS Intel (x64)**: solo si aparece demanda real y se resuelve el problema de runner
   (self-hosted o servicio de terceros).
 - **Bundle de servidor para macOS** (+ unidad `launchd` equivalente a `nucleus.service`).
 - **Auto-inducción** de subdominios/labels (clustering + reglas, sin LLM) — el diferencial de
   producto que figura en "próximos pasos" del README.
+
+Cualquiera de estas es aditiva (nuevo `minor`), no rompe el contrato de `1.0.0`.
 
 > Nota: el **tag y la publicación de una release** son acciones de cara al exterior; no las haré
 > sin tu confirmación explícita.

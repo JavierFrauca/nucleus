@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Nucleus API
-  version: 0.1.0
+  version: 1.0.0
   description: |
     HTTP API for **Nucleus**, a RAG-oriented database engine. Upload raw
     documents (pdf, docx, xlsx, html, md, txt…); Nucleus extracts, chunks,
