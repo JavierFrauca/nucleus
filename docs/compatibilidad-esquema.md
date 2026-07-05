@@ -9,7 +9,7 @@ en la tabla `meta` de cada fichero `.redb`.
 | Versión de Nucleus | `SCHEMA_VERSION` | Cifrado | Notas |
 |---------------------|:---:|---------|-------|
 | v0.1.0 – v0.1.2      | 1   | Sin cifrar | Índices secundarios (tags, subdominios, hashes de contenido) en claro. |
-| v0.2.0+              | 2   | **Siempre activo** | Índices secundarios ofuscados con HMAC con clave (ver [operación](operacion.md#cifrado-en-reposo)). |
+| v0.2.0, v1.0.0+       | 2   | **Siempre activo** | Índices secundarios ofuscados con HMAC con clave (ver [operación](operacion.md#cifrado-en-reposo)). El bump a `1.0.0` no cambió el esquema — mismo `SCHEMA_VERSION = 2`. |
 
 ## Qué migra solo
 
