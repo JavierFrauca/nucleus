@@ -3,7 +3,7 @@
 Checklist priorizada para que Nucleus pueda anunciarse como **estable / production-ready**
 sin asteriscos. Marca lo hecho y lo que falta; al final, las decisiones que dependen de ti.
 
-## Estado actual (v0.1.2 → en camino a v0.2.0)
+## Estado actual (v0.2.0)
 
 - ✅ **106 tests** en verde (78 motor + 6 integración del motor + 15 C-ABI del FFI [1 ignorado,
   descarga el modelo] + 7 e2e HTTP) + clippy `-D warnings` + `cargo fmt --check`.
