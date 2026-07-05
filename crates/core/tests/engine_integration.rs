@@ -20,7 +20,10 @@ use tempfile::TempDir;
 /// Returns the `TempDir` too so the caller keeps the database alive for the test.
 fn fresh_engine() -> (Engine, TempDir) {
     let dir = TempDir::new().expect("create temp dir");
-    let storage = Storage::open(dir.path().join("test.redb")).expect("open storage");
+    // Keep the machine key file inside the tempdir so the test stays hermetic.
+    let keyfile = dir.path().join("test.key");
+    let storage = Storage::open_with_options(dir.path().join("test.redb"), None, Some(&keyfile))
+        .expect("open storage");
     let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(64));
     let engine = Engine::open(storage, embedder, IndexKind::Flat, None).expect("open engine");
     (engine, dir)

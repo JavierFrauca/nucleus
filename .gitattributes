@@ -1,0 +1,3 @@
+# Keep shell scripts LF-only so they run on Linux/macOS regardless of the
+# committer's platform (a CRLF in the shebang breaks `#!/usr/bin/env bash`).
+*.sh text eol=lf

@@ -73,6 +73,11 @@ pub enum NucleusError {
     #[error("i/o error")]
     Io(#[from] std::io::Error),
 
+    /// Encryption, decryption or key derivation failed (e.g. a wrong passphrase
+    /// for an encrypted database, or corrupt ciphertext).
+    #[error("encryption error: {0}")]
+    Crypto(String),
+
     /// The request carried no valid credentials.
     #[error("unauthorized")]
     Unauthorized,
@@ -104,6 +109,11 @@ impl NucleusError {
     /// Shorthand for an [`NucleusError::InvalidRequest`].
     pub fn invalid(msg: impl Into<String>) -> Self {
         Self::InvalidRequest(msg.into())
+    }
+
+    /// Shorthand for a [`NucleusError::Crypto`].
+    pub fn crypto(msg: impl Into<String>) -> Self {
+        Self::Crypto(msg.into())
     }
 }
 

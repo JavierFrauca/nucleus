@@ -34,7 +34,13 @@ typedef struct NucleusEngine NucleusEngine;
 /* lifecycle --------------------------------------------------------------- */
 
 /* Open or create a database. config_json e.g.:
- * {"db_path":"data/nucleus.redb","model_cache":"models","index_kind":"flat","gpu":false} */
+ * {"db_path":"data/nucleus.redb","model_cache":"models","index_kind":"flat","gpu":false}
+ * Encryption at rest is ALWAYS on (XChaCha20-Poly1305). Optional "passphrase":"..."
+ * derives the key via Argon2id (portable); without it a per-machine key is used,
+ * read from optional "keyfile":"..." (else NUCLEUS_KEYFILE, else an OS per-user
+ * config dir) -- kept OUT of the database directory so a data backup never carries
+ * the key; back the key up separately. A legacy unencrypted DB is migrated
+ * transparently on first open. */
 int  nucleus_open(const char *config_json, NucleusEngine **out_handle);
 void nucleus_close(NucleusEngine *handle);
 
@@ -105,6 +111,13 @@ int nucleus_chunk_context(NucleusEngine *handle, const char *input_json, char **
 /* maintenance ------------------------------------------------------------- */
 
 int nucleus_persist_indexes(NucleusEngine *handle, char **out_json);                  /* {"persisted":N} */
+/* Consistent, encrypted snapshot of the whole database to a file.
+ * {"dest_path":"backups/nucleus.redb"} -> {"backed_up":true,"path":"..."} */
+int nucleus_backup(NucleusEngine *handle, const char *input_json, char **out_json);
+/* Rotate the encryption key: write a copy re-encrypted under a new key. Reopen the
+ * result with the new key to activate.
+ * {"dest_path":"...","passphrase":"...","keyfile":"..."} -> {"rekeyed":true,"path":"..."} */
+int nucleus_rekey(NucleusEngine *handle, const char *input_json, char **out_json);
 
 #ifdef __cplusplus
 } /* extern "C" */

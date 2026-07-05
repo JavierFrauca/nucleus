@@ -75,6 +75,12 @@ pub struct AppState {
     pub schedule: Arc<RwLock<ScheduleConfig>>,
     /// Per-IP request budget per minute. `0` disables rate limiting.
     pub rate_limit_rpm: u32,
+    /// Passphrase for encryption at rest, if set. Needed to reopen the store on a
+    /// restore hot-swap. `None` means the machine key (below) is used.
+    pub passphrase: Option<String>,
+    /// Machine key file location (used only without a passphrase). Threaded so a
+    /// restore reopens with the same key the database was opened with.
+    pub keyfile: Option<PathBuf>,
 }
 
 /// Backup schedule (runtime-adjustable via the API).
@@ -164,6 +170,12 @@ pub struct Config {
     pub backup_keep_fulls: usize,
     /// Per-IP request budget per minute. `0` (default) disables rate limiting.
     pub rate_limit_rpm: u32,
+    /// Passphrase for encryption at rest (`NUCLEUS_PASSPHRASE`). `None` (default)
+    /// falls back to the machine key.
+    pub passphrase: Option<String>,
+    /// Machine key file path (`NUCLEUS_KEYFILE`). `None` uses the default per-user
+    /// location (kept separate from the database directory).
+    pub keyfile: Option<PathBuf>,
 }
 
 impl Config {
@@ -261,6 +273,13 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0),
+            passphrase: env::var("NUCLEUS_PASSPHRASE")
+                .ok()
+                .filter(|v| !v.is_empty()),
+            keyfile: env::var("NUCLEUS_KEYFILE")
+                .ok()
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from),
         }
     }
 }

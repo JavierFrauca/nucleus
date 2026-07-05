@@ -29,15 +29,59 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Windows is the 1.0 target; Linux is the cheap/fast baseline that also
-        # covers the non-Windows code paths. macOS is deferred (future platform).
-        os: [ubuntu-latest, windows-latest]
+        # 1.0 target platforms: Windows x64, Linux x64, macOS arm64 (Apple Silicon).
+        # macOS Intel (macos-13) is intentionally excluded — GitHub no longer
+        # schedules runners for that label (jobs hang 24h "awaiting a runner");
+        # Linux/macOS are exercised to validate the non-Windows code paths
+        # (machine-key 0600 fallback, XDG/HOME default paths, SIGTERM) and to
+        # confirm `ort` downloads ONNX Runtime per platform.
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # Builds every crate (incl. the `nucleus` cdylib) and runs the suite. The
-      # ignored FFI/model-download test is not run here (no `--ignored`), so CI
-      # needs no HuggingFace model. `ort` downloads ONNX Runtime at build time.
+      # Builds every crate (incl. the `nucleus` cdylib → .so/.dylib/.dll) and runs the
+      # suite. The ignored FFI/model-download test is not run here (no `--ignored`), so
+      # CI needs no HuggingFace model. `ort` downloads ONNX Runtime at build time.
       - name: Test
         run: cargo test --workspace
+
+  # Explicitly produce the native dynamic library on each OS and upload it, so a
+  # green run proves the embeddable artifact (.so/.dylib/.dll) actually builds
+  # everywhere — the prerequisite for cross-platform bundles.
+  cdylib:
+    name: cdylib (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Same rationale as the `test` matrix above: no macos-13 (Intel) runner.
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build cdylib
+        run: cargo build -p nucleus-ffi --release
+      - name: Upload library
+        uses: actions/upload-artifact@v4
+        with:
+          name: nucleus-cdylib-${{ matrix.os }}
+          # Pick up whichever extension the platform produced.
+          path: |
+            target/release/*nucleus.dll
+            target/release/libnucleus.so
+            target/release/libnucleus.dylib
+          if-no-files-found: warn
+      # Smoke-test the Linux/macOS packaging script (the one Release uses) on every
+      # run, and upload the bundle so it can be inspected without cutting a tag.
+      - name: Package bundle (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: bash packaging/build-lib.sh dev
+      - name: Upload bundle
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nucleus-bundle-${{ matrix.os }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
