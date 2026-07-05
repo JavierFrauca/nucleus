@@ -5,8 +5,8 @@ sin asteriscos. Marca lo hecho y lo que falta; al final, las decisiones que depe
 
 ## Estado actual (v0.2.0)
 
-- ✅ **106 tests** en verde (78 motor + 6 integración del motor + 15 C-ABI del FFI [1 ignorado,
-  descarga el modelo] + 7 e2e HTTP) + clippy `-D warnings` + `cargo fmt --check`.
+- ✅ **114 tests** en verde (78 motor + 6 integración del motor + 15 C-ABI del FFI [1 ignorado,
+  descarga el modelo] + 15 e2e HTTP) + clippy `-D warnings` + `cargo fmt --check`.
 - ✅ Hardening del servidor: auth por token con scopes, dedup por hash, apagado ordenado con
   volcado de índices, versionado de esquema con gate de migración, `/healthz` + `/readyz` +
   `/metrics`, CORS opt-in, listados paginados, **rate limiting por IP** (token-bucket,
@@ -48,12 +48,25 @@ sin asteriscos. Marca lo hecho y lo que falta; al final, las decisiones que depe
 
 ## Recomendado antes de presumir de "production" (should)
 
-4. **Tests HTTP de autorización**: cubrir scopes `Read`/`Write`/`Admin` por endpoint (hoy el e2e
-   valida el camino feliz y el 401, pero no la matriz de permisos).
-5. **Rate limit tras proxy**: honrar `X-Forwarded-For` de forma opt-in (cuando se confía en el
-   proxy), porque hoy se limita por IP del peer directo.
-6. **Pruebas de carga/concurrencia** reproducibles en CI (un smoke de `rendimiento.md`).
-7. **Guía de compatibilidad de esquema**: qué versiones de BD abre cada release.
+Los 4 puntos de esta sección están **resueltos**:
+
+4. ✅ **Tests HTTP de autorización**: `scope_matrix_rejects_insufficient_or_wrong_domain_tokens`
+   en `crates/server/src/routes.rs` cubre Read/Write/Admin, `DomainScope::One` vs `All`, y que un
+   Admin de un solo dominio no cuela como admin global — no solo el camino feliz y el 401.
+5. ✅ **Rate limit tras proxy**: `NUCLEUS_TRUST_PROXY` (opt-in, `false` por defecto) hace que
+   `client_ip()` en `crates/server/src/rate_limit.rs` use `X-Forwarded-For` en vez de la IP del
+   peer TCP — solo si el proxy sobrescribe esa cabecera. Documentado en
+   [operación](operacion.md#seguridad).
+6. ✅ **Smoke de carga/concurrencia en CI**: `concurrent_search_matches_sequential_baseline` en
+   `routes.rs` compara el top-1 de cada búsqueda bajo concurrencia (16 workers) contra una
+   baseline secuencial, usando `MockEmbedder` — sin descargar el modelo real, corre en
+   `cargo test --workspace` en las 3 plataformas. El benchmark real y manual
+   (`scripts/loadtest.mjs`, contra el binario + modelo real) sigue existiendo aparte para medir
+   números reales de `rendimiento.md`.
+7. ✅ **Guía de compatibilidad de esquema**: [`docs/compatibilidad-esquema.md`](compatibilidad-esquema.md)
+   documenta qué `SCHEMA_VERSION` usa cada release, qué migra sola (v1 plaintext → v2 cifrada) y
+   qué no (una BD por debajo del `SCHEMA_VERSION` soportado que ya esté cifrada — hoy no ocurre en
+   ningún release oficial, pero el motor lo rechaza explícitamente en vez de arriesgarse).
 
 ## Futuro (post-1.0)
 
@@ -62,7 +75,6 @@ sin asteriscos. Marca lo hecho y lo que falta; al final, las decisiones que depe
 - **Bundle de servidor para macOS** (+ unidad `launchd` equivalente a `nucleus.service`).
 - **Auto-inducción** de subdominios/labels (clustering + reglas, sin LLM) — el diferencial de
   producto que figura en "próximos pasos" del README.
-- Honrar `X-Forwarded-For` (opt-in) en el rate limit cuando se está tras un proxy de confianza.
 
 > Nota: el **tag y la publicación de una release** son acciones de cara al exterior; no las haré
 > sin tu confirmación explícita.
