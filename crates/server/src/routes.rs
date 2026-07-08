@@ -9,7 +9,7 @@ use std::sync::atomic::Ordering;
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -62,6 +62,7 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(health))
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
+        .route("/dashboard", get(dashboard))
         .route("/v1/domains", post(create_domain).get(list_domains))
         .route("/v1/domains/{id}", get(get_domain))
         .route(
@@ -120,6 +121,14 @@ async fn readyz(State(st): State<AppState>) -> Result<&'static str, ApiError> {
 /// Prometheus-style metrics (plain text). Protect via network/proxy.
 async fn metrics(State(st): State<AppState>) -> String {
     st.metrics.render()
+}
+
+/// Static explorer/management UI (vanilla HTML+JS, no build step, embedded in the
+/// binary). It carries no auth of its own — it's inert markup — and authenticates
+/// every `/v1/*` call it makes with the bearer token the user pastes in, so it
+/// exercises the exact same scope checks as any other API client.
+async fn dashboard() -> Html<&'static str> {
+    Html(include_str!("dashboard.html"))
 }
 
 // --- domains ---------------------------------------------------------------
@@ -1702,6 +1711,25 @@ mod tests {
             let resp = h.app.clone().oneshot(req).await.unwrap();
             assert_eq!(resp.status(), StatusCode::OK);
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dashboard_serves_html_without_auth() {
+        // The shell is inert static markup — no token needed to load it. It
+        // authenticates itself, client-side, against the same /v1/* API as any
+        // other caller.
+        let (h, _dir) = harness();
+        let req = Request::builder()
+            .method("GET")
+            .uri("/dashboard")
+            .body(Body::empty())
+            .unwrap();
+        let resp = h.app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("Nucleus"));
+        assert!(html.contains("token-input"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nucleus — Dashboard</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: #1c1c1e;
+    background: #f5f5f7;
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: .75rem 1.25rem; background: #1c1c1e; color: #fff;
+  }
+  header h1 { font-size: 1.05rem; margin: 0; font-weight: 600; }
+  header .status { font-size: .8rem; opacity: .75; }
+  button {
+    cursor: pointer; border: 1px solid #d0d0d5; background: #fff; color: #1c1c1e;
+    border-radius: 6px; padding: .4rem .8rem; font-size: .85rem;
+  }
+  button.primary { background: #2563eb; color: #fff; border-color: #2563eb; }
+  button.danger { background: #fff; color: #dc2626; border-color: #dc2626; }
+  button:hover { filter: brightness(0.97); }
+  input, textarea {
+    border: 1px solid #d0d0d5; border-radius: 6px; padding: .4rem .6rem;
+    font-size: .85rem; width: 100%;
+  }
+  #connect-view {
+    max-width: 420px; margin: 4rem auto; background: #fff; padding: 1.5rem;
+    border-radius: 10px; box-shadow: 0 1px 3px rgba(0,0,0,.08);
+  }
+  #connect-view h2 { margin-top: 0; font-size: 1rem; }
+  #connect-view .field { margin-bottom: .75rem; }
+  #connect-view label { display: block; font-size: .8rem; margin-bottom: .25rem; color: #555; }
+  #error-banner {
+    display: none; background: #fee2e2; color: #991b1b; padding: .6rem 1rem;
+    font-size: .85rem; border-bottom: 1px solid #fecaca;
+  }
+  #app-view { display: none; }
+  .layout { display: flex; height: calc(100vh - 46px); }
+  aside {
+    width: 240px; border-right: 1px solid #e2e2e6; background: #fff;
+    padding: 1rem; overflow-y: auto; flex-shrink: 0;
+  }
+  aside h3 { font-size: .75rem; text-transform: uppercase; color: #888; margin: 0 0 .5rem; }
+  #domain-list { list-style: none; padding: 0; margin: 0 0 1rem; }
+  #domain-list li {
+    padding: .5rem .6rem; border-radius: 6px; cursor: pointer; font-size: .88rem;
+  }
+  #domain-list li:hover { background: #f0f0f3; }
+  #domain-list li.active { background: #2563eb; color: #fff; }
+  main { flex: 1; overflow-y: auto; padding: 1.25rem 1.5rem; }
+  .placeholder { color: #888; font-size: .9rem; }
+  .domain-header h2 { margin: 0 0 .25rem; font-size: 1.15rem; }
+  .domain-header .meta { font-size: .8rem; color: #666; margin-bottom: 1rem; }
+  section.card {
+    background: #fff; border-radius: 10px; padding: 1rem 1.1rem; margin-bottom: 1rem;
+    box-shadow: 0 1px 3px rgba(0,0,0,.06);
+  }
+  section.card h3 { margin: 0 0 .75rem; font-size: .9rem; }
+  .row { display: flex; gap: .5rem; align-items: center; }
+  .row input[type=text], .row input[type=number] { flex: 1; }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  ul.plain { list-style: none; padding: 0; margin: .5rem 0 0; }
+  ul.plain li {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: .4rem 0; border-bottom: 1px solid #f0f0f3; font-size: .85rem;
+  }
+  ul.plain li:last-child { border-bottom: none; }
+  .hit { padding: .6rem 0; border-bottom: 1px solid #f0f0f3; }
+  .hit:last-child { border-bottom: none; }
+  .hit .score { font-size: .75rem; color: #2563eb; font-weight: 600; }
+  .hit .text { font-size: .85rem; margin-top: .2rem; }
+  .tag-chip {
+    display: inline-block; background: #eef2ff; color: #3730a3; font-size: .7rem;
+    padding: .1rem .5rem; border-radius: 999px; margin-right: .25rem;
+  }
+  .muted { color: #888; font-size: .8rem; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Nucleus</h1>
+  <div>
+    <span class="status" id="conn-status"></span>
+    <button id="disconnect-btn" style="display:none; margin-left:.75rem;">Desconectar</button>
+  </div>
+</header>
+
+<div id="error-banner"></div>
+
+<div id="connect-view">
+  <h2>Conectar</h2>
+  <div class="field">
+    <label for="token-input">Token (Bearer)</label>
+    <input id="token-input" type="password" placeholder="nuc_...">
+  </div>
+  <button class="primary" id="connect-btn" style="width:100%">Conectar</button>
+  <p class="muted" style="margin-top:.75rem">
+    Explorador/gestión básica sobre la API HTTP de Nucleus. El token no sale de este
+    navegador (se guarda en <code>sessionStorage</code> y se envía como
+    <code>Authorization: Bearer</code> en cada petición); solo puedes hacer lo que tu
+    token permita (scopes Read/Write/Admin).
+  </p>
+</div>
+
+<div id="app-view">
+  <div class="layout">
+    <aside>
+      <h3>Dominios</h3>
+      <ul id="domain-list"></ul>
+      <div class="row">
+        <input id="new-domain-name" type="text" placeholder="nombre">
+        <button id="new-domain-btn">+</button>
+      </div>
+    </aside>
+    <main id="main-panel">
+      <p class="placeholder">Selecciona un dominio de la izquierda.</p>
+    </main>
+  </div>
+</div>
+
+<script>
+(() => {
+  const state = {
+    base: location.origin,
+    token: sessionStorage.getItem('nucleus_token') || '',
+    domains: [],
+    selectedId: null,
+  };
+
+  const $ = (sel) => document.querySelector(sel);
+
+  function showError(msg) {
+    const b = $('#error-banner');
+    b.textContent = msg;
+    b.style.display = 'block';
+    clearTimeout(showError._t);
+    showError._t = setTimeout(() => (b.style.display = 'none'), 5000);
+  }
+
+  // Thin fetch wrapper: adds the bearer token, throws with the server's error
+  // message on non-2xx, and forces a re-connect on 401 (invalid/expired token).
+  async function api(method, path, body) {
+    const res = await fetch(state.base + path, {
+      method,
+      headers: {
+        Authorization: 'Bearer ' + state.token,
+        'Content-Type': 'application/json',
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+    if (res.status === 401) {
+      disconnect();
+      throw new Error('Token inválido o caducado.');
+    }
+    const text = await res.text();
+    const data = text ? JSON.parse(text) : null;
+    if (!res.ok) {
+      const msg = (data && data.error) || `HTTP ${res.status}`;
+      throw new Error(res.status === 403 ? `Sin permiso: ${msg}` : msg);
+    }
+    return data;
+  }
+
+  function showConnected(connected) {
+    $('#connect-view').style.display = connected ? 'none' : 'block';
+    $('#app-view').style.display = connected ? 'block' : 'none';
+    $('#disconnect-btn').style.display = connected ? 'inline-block' : 'none';
+    $('#conn-status').textContent = connected ? state.base : '';
+  }
+
+  function disconnect() {
+    sessionStorage.removeItem('nucleus_token');
+    state.token = '';
+    state.domains = [];
+    state.selectedId = null;
+    showConnected(false);
+  }
+
+  async function connect() {
+    const token = $('#token-input').value.trim();
+    if (!token) return;
+    state.token = token;
+    try {
+      await loadDomains();
+      sessionStorage.setItem('nucleus_token', token);
+      showConnected(true);
+    } catch (e) {
+      state.token = '';
+      showError(e.message);
+    }
+  }
+
+  async function loadDomains() {
+    state.domains = await api('GET', '/v1/domains');
+    renderDomainList();
+  }
+
+  function renderDomainList() {
+    const ul = $('#domain-list');
+    ul.innerHTML = '';
+    for (const d of state.domains) {
+      const li = document.createElement('li');
+      li.textContent = d.name;
+      li.className = d.id === state.selectedId ? 'active' : '';
+      li.onclick = () => selectDomain(d.id);
+      ul.appendChild(li);
+    }
+  }
+
+  async function createDomain() {
+    const name = $('#new-domain-name').value.trim();
+    if (!name) return;
+    try {
+      await api('POST', '/v1/domains', { name });
+      $('#new-domain-name').value = '';
+      await loadDomains();
+    } catch (e) {
+      showError(e.message);
+    }
+  }
+
+  async function selectDomain(id) {
+    state.selectedId = id;
+    renderDomainList();
+    const domain = state.domains.find((d) => d.id === id);
+    renderMain(domain);
+    await Promise.all([loadDocuments(id), loadTags(id), loadSubdomains(id)]);
+  }
+
+  function renderMain(domain) {
+    $('#main-panel').innerHTML = `
+      <div class="domain-header">
+        <h2>${escapeHtml(domain.name)}</h2>
+        <div class="meta">id ${domain.id} · modelo ${escapeHtml(domain.model)} · dim ${domain.dim}</div>
+      </div>
+      <section class="card">
+        <h3>Buscar</h3>
+        <div class="row">
+          <input id="search-query" type="text" placeholder="consulta en lenguaje natural">
+          <input id="search-k" type="number" value="5" min="1" max="50" style="width:70px">
+          <button class="primary" id="search-btn">Buscar</button>
+        </div>
+        <div id="search-results"></div>
+      </section>
+      <div class="grid-2">
+        <section class="card">
+          <h3>Documentos</h3>
+          <ul class="plain" id="doc-list"></ul>
+        </section>
+        <section class="card">
+          <h3>Etiquetas</h3>
+          <ul class="plain" id="tag-list"></ul>
+          <div class="row" style="margin-top:.5rem">
+            <input id="new-tag-name" type="text" placeholder="nombre">
+            <button id="new-tag-btn">+</button>
+          </div>
+          <h3 style="margin-top:1rem">Subdominios</h3>
+          <ul class="plain" id="subdomain-list"></ul>
+          <div class="row" style="margin-top:.5rem">
+            <input id="new-subdomain-name" type="text" placeholder="nombre">
+            <button id="new-subdomain-btn">+</button>
+          </div>
+        </section>
+      </div>
+    `;
+    $('#search-btn').onclick = runSearch;
+    $('#new-tag-btn').onclick = () => createTag(domain.id);
+    $('#new-subdomain-btn').onclick = () => createSubdomain(domain.id);
+  }
+
+  async function runSearch() {
+    const query = $('#search-query').value.trim();
+    const k = Number($('#search-k').value) || 5;
+    if (!query) return;
+    const box = $('#search-results');
+    box.innerHTML = '<p class="muted">Buscando…</p>';
+    try {
+      const hits = await api('POST', `/v1/domains/${state.selectedId}/search`, { query, k });
+      box.innerHTML = hits.length
+        ? hits.map(hitRow).join('')
+        : '<p class="muted">Sin resultados.</p>';
+    } catch (e) {
+      showError(e.message);
+      box.innerHTML = '';
+    }
+  }
+
+  function hitRow(h) {
+    return `<div class="hit">
+      <div class="score">${h.score.toFixed(3)} · doc ${h.document_id} · chunk ${h.chunk_id}</div>
+      <div class="text">${escapeHtml(h.text)}</div>
+    </div>`;
+  }
+
+  async function loadDocuments(domainId) {
+    const list = $('#doc-list');
+    try {
+      const docs = await api('GET', `/v1/domains/${domainId}/documents`);
+      list.innerHTML = docs.length
+        ? docs.map((d) => `<li>
+            <span>${escapeHtml(d.title)} <span class="muted">#${d.id}</span></span>
+            <button data-doc="${d.id}" class="danger doc-del">Borrar</button>
+          </li>`).join('')
+        : '<li class="muted">Sin documentos.</li>';
+      list.querySelectorAll('.doc-del').forEach((btn) => {
+        btn.onclick = () => deleteDocument(domainId, Number(btn.dataset.doc));
+      });
+    } catch (e) {
+      showError(e.message);
+    }
+  }
+
+  async function deleteDocument(domainId, docId) {
+    try {
+      await api('DELETE', `/v1/documents/${docId}`);
+      await loadDocuments(domainId);
+    } catch (e) {
+      showError(e.message);
+    }
+  }
+
+  async function loadTags(domainId) {
+    try {
+      const tags = await api('GET', `/v1/domains/${domainId}/tags`);
+      $('#tag-list').innerHTML = tags.length
+        ? tags.map((t) => `<li>${escapeHtml(t.name)}</li>`).join('')
+        : '<li class="muted">Sin etiquetas.</li>';
+    } catch (e) {
+      showError(e.message);
+    }
+  }
+
+  async function createTag(domainId) {
+    const name = $('#new-tag-name').value.trim();
+    if (!name) return;
+    try {
+      await api('POST', `/v1/domains/${domainId}/tags`, { name });
+      $('#new-tag-name').value = '';
+      await loadTags(domainId);
+    } catch (e) {
+      showError(e.message);
+    }
+  }
+
+  async function loadSubdomains(domainId) {
+    try {
+      const subs = await api('GET', `/v1/domains/${domainId}/subdomains`);
+      $('#subdomain-list').innerHTML = subs.length
+        ? subs.map((s) => `<li>${escapeHtml(s.name)}</li>`).join('')
+        : '<li class="muted">Sin subdominios.</li>';
+    } catch (e) {
+      showError(e.message);
+    }
+  }
+
+  async function createSubdomain(domainId) {
+    const name = $('#new-subdomain-name').value.trim();
+    if (!name) return;
+    try {
+      await api('POST', `/v1/domains/${domainId}/subdomains`, { name });
+      $('#new-subdomain-name').value = '';
+      await loadSubdomains(domainId);
+    } catch (e) {
+      showError(e.message);
+    }
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    })[c]);
+  }
+
+  $('#connect-btn').onclick = connect;
+  $('#token-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') connect(); });
+  $('#disconnect-btn').onclick = disconnect;
+  $('#new-domain-btn').onclick = createDomain;
+  $('#new-domain-name').addEventListener('keydown', (e) => { if (e.key === 'Enter') createDomain(); });
+
+  // Auto-connect if a token from a previous session is still in sessionStorage.
+  if (state.token) {
+    loadDomains().then(() => showConnected(true)).catch(() => disconnect());
+  } else {
+    showConnected(false);
+  }
+})();
+</script>
+</body>
+</html>
