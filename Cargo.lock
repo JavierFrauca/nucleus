@@ -2151,7 +2151,7 @@ dependencies = [
 
 [[package]]
 name = "nucleus-core"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "argon2",
  "bincode 2.0.1",
@@ -2181,7 +2181,7 @@ dependencies = [
 
 [[package]]
 name = "nucleus-ffi"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "nucleus-core",
  "serde",
@@ -2191,7 +2191,7 @@ dependencies = [
 
 [[package]]
 name = "nucleus-server"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "axum",
  "http-body-util",
