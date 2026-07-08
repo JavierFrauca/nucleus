@@ -35,8 +35,8 @@ Nucleus sigue [SemVer](https://semver.org/). A partir de `1.0.0`, lo que sigue e
 
 ### Estado en el momento del bump (v0.2.0 → v1.0.0)
 
-- ✅ **114 tests** en verde (78 motor + 6 integración del motor + 15 C-ABI del FFI [1 ignorado,
-  descarga el modelo] + 15 e2e HTTP) + clippy `-D warnings` + `cargo fmt --check`.
+- ✅ **115 tests** en verde (78 motor + 6 integración del motor + 15 C-ABI del FFI [1 ignorado,
+  descarga el modelo] + 16 e2e HTTP) + clippy `-D warnings` + `cargo fmt --check`.
 - ✅ Hardening del servidor: auth por token con scopes (con matriz de tests 403), dedup por
   hash, apagado ordenado con volcado de índices, versionado de esquema con gate de migración,
   `/healthz` + `/readyz` + `/metrics`, CORS opt-in, listados paginados, rate limiting por IP

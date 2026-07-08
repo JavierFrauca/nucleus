@@ -220,7 +220,7 @@ crates/
 
 ```bash
 cargo build            # workspace
-cargo test --workspace # 114 tests (core, integración del motor, C-ABI del FFI y e2e HTTP)
+cargo test --workspace # 115 tests (core, integración del motor, C-ABI del FFI y e2e HTTP)
 cargo clippy --workspace --all-targets
 cargo build --features gpu  # opcional: inferencia por GPU (ONNX DirectML)
 
@@ -264,6 +264,21 @@ Al primer arranque, si no hay tokens, se imprime **una sola vez** un token admin
 > (`multilingual-e5-small`, ~450 MB) y lo cachea. Requiere red e espacio en disco esa
 > primera vez.
 
+## Dashboard web
+
+**Prototipo.** `GET /dashboard` sirve un explorador/gestor mínimo (HTML+JS vainilla,
+sin build ni dependencias, embebido en el binario — inspirado en el de
+[Qdrant](https://qdrant.tech/)). No tiene autenticación propia: es markup inerte que
+pide el token en el navegador (se guarda en `sessionStorage`, nunca en disco) y lo usa
+como `Authorization: Bearer` contra la misma API `/v1/*` — mismos scopes, mismo 403 que
+cualquier otro cliente. Cubre: alta/listado de dominios, búsqueda, listado/alta/borrado
+básico de documentos, etiquetas y subdominios, y **backups** (crear copia full y
+restaurar, requiere token Admin). No cubre (aún): ingesta de documentos ni gestión de
+tokens desde la UI, ni editar/borrar dominios, etiquetas o subdominios (esas
+operaciones existen en el motor y el FFI, pero la API HTTP todavía no las expone —
+para eso, la API directamente). Ponlo tras TLS igual que el resto del servidor (ver
+[operación](docs/operacion.md#seguridad)).
+
 ## API
 
 Todas las rutas (salvo `/healthz`) requieren `Authorization: Bearer <token>`.
@@ -271,6 +286,7 @@ Todas las rutas (salvo `/healthz`) requieren `Authorization: Bearer <token>`.
 | Método & ruta                          | Permiso  | Descripción                          |
 |----------------------------------------|----------|--------------------------------------|
 | `GET /healthz`                         | —        | Health check                         |
+| `GET /dashboard`                       | —        | Explorador/gestión web (prototipo). Sin auth propia: pide el token en el navegador y lo usa contra esta misma API — ver [más abajo](#dashboard-web) |
 | `POST /v1/domains`                     | Admin    | Crear dominio                        |
 | `GET /v1/domains`                      | auth     | Listar dominios                      |
 | `GET /v1/domains/{id}`                 | Read     | Obtener dominio                      |
