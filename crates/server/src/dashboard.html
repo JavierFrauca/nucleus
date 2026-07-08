@@ -119,6 +119,10 @@
         <input id="new-domain-name" type="text" placeholder="nombre">
         <button id="new-domain-btn">+</button>
       </div>
+
+      <h3 style="margin-top:1.5rem">Backups</h3>
+      <ul class="plain" id="backup-list"></ul>
+      <button id="new-backup-btn" style="width:100%; margin-top:.5rem">+ Crear copia</button>
     </aside>
     <main id="main-panel">
       <p class="placeholder">Selecciona un dominio de la izquierda.</p>
@@ -192,6 +196,7 @@
       await loadDomains();
       sessionStorage.setItem('nucleus_token', token);
       showConnected(true);
+      loadBackups(); // best-effort: Admin-only, a scoped token just won't see this section
     } catch (e) {
       state.token = '';
       showError(e.message);
@@ -222,6 +227,61 @@
       await api('POST', '/v1/domains', { name });
       $('#new-domain-name').value = '';
       await loadDomains();
+    } catch (e) {
+      showError(e.message);
+    }
+  }
+
+  function humanBytes(n) {
+    if (n < 1024) return `${n} B`;
+    const units = ['KB', 'MB', 'GB', 'TB'];
+    let i = -1;
+    do { n /= 1024; i++; } while (n >= 1024 && i < units.length - 1);
+    return `${n.toFixed(1)} ${units[i]}`;
+  }
+
+  async function loadBackups() {
+    const list = $('#backup-list');
+    try {
+      const backups = await api('GET', '/v1/backups');
+      list.innerHTML = backups.length
+        ? backups
+            .slice()
+            .reverse()
+            .map((b) => `<li>
+              <span>${b.kind === 'Full' ? 'Full' : 'Diff'} · ${humanBytes(b.bytes)}<br>
+                <span class="muted">${new Date(b.created_at).toLocaleString()}</span></span>
+              <button data-backup="${b.id}" class="restore-btn">Restaurar</button>
+            </li>`)
+            .join('')
+        : '<li class="muted">Sin copias.</li>';
+      list.querySelectorAll('.restore-btn').forEach((btn) => {
+        btn.onclick = () => restoreBackup(btn.dataset.backup);
+      });
+    } catch (e) {
+      // Most likely a non-Admin token: no error banner, just an inert section.
+      list.innerHTML = '<li class="muted">Sin acceso (requiere Admin).</li>';
+    }
+  }
+
+  async function createBackup() {
+    try {
+      await api('POST', '/v1/backups', { kind: 'full' });
+      await loadBackups();
+    } catch (e) {
+      showError(e.message);
+    }
+  }
+
+  async function restoreBackup(id) {
+    if (!confirm(`¿Restaurar la copia ${id}? Sustituye la base de datos activa (se toma antes una copia de seguridad del estado actual).`)) {
+      return;
+    }
+    try {
+      await api('POST', '/v1/backups/restore', { id });
+      await loadBackups();
+      await loadDomains();
+      if (state.selectedId) await selectDomain(state.selectedId);
     } catch (e) {
       showError(e.message);
     }
@@ -384,10 +444,11 @@
   $('#disconnect-btn').onclick = disconnect;
   $('#new-domain-btn').onclick = createDomain;
   $('#new-domain-name').addEventListener('keydown', (e) => { if (e.key === 'Enter') createDomain(); });
+  $('#new-backup-btn').onclick = createBackup;
 
   // Auto-connect if a token from a previous session is still in sessionStorage.
   if (state.token) {
-    loadDomains().then(() => showConnected(true)).catch(() => disconnect());
+    loadDomains().then(() => { showConnected(true); loadBackups(); }).catch(() => disconnect());
   } else {
     showConnected(false);
   }

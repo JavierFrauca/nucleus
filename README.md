@@ -271,10 +271,12 @@ sin build ni dependencias, embebido en el binario — inspirado en el de
 [Qdrant](https://qdrant.tech/)). No tiene autenticación propia: es markup inerte que
 pide el token en el navegador (se guarda en `sessionStorage`, nunca en disco) y lo usa
 como `Authorization: Bearer` contra la misma API `/v1/*` — mismos scopes, mismo 403 que
-cualquier otro cliente. Cubre: alta/listado de dominios, búsqueda, y
-listado/alta/borrado básico de documentos, etiquetas y subdominios. No cubre (aún):
-ingesta de documentos, gestión de tokens ni backups desde la UI — para eso, la API
-directamente. Ponlo tras TLS igual que el resto del servidor (ver
+cualquier otro cliente. Cubre: alta/listado de dominios, búsqueda, listado/alta/borrado
+básico de documentos, etiquetas y subdominios, y **backups** (crear copia full y
+restaurar, requiere token Admin). No cubre (aún): ingesta de documentos ni gestión de
+tokens desde la UI, ni editar/borrar dominios, etiquetas o subdominios (esas
+operaciones existen en el motor y el FFI, pero la API HTTP todavía no las expone —
+para eso, la API directamente). Ponlo tras TLS igual que el resto del servidor (ver
 [operación](docs/operacion.md#seguridad)).
 
 ## API
