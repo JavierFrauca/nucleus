@@ -72,6 +72,41 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
 
+  # Pack and push Nucleus.Client (the HTTP client) to NuGet.org. Independent of
+  # the native bundle jobs above (no `needs`) so a NuGet hiccup never blocks the
+  # GitHub Release, and vice versa. Requires the NUGET_API_KEY repo secret
+  # (Settings > Secrets and variables > Actions) — an API key from your NuGet.org
+  # account; without it this job packs successfully but skips the push.
+  nuget-publish:
+    name: nuget-publish (Nucleus.Client)
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Version
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Pack
+        run: |
+          dotnet pack clients/csharp/Nucleus.Client/Nucleus.Client.csproj \
+            -c Release -p:PackageVersion=${{ steps.ver.outputs.version }} \
+            -o dist-nuget
+      - name: Push to NuGet.org
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          if [ -z "$NUGET_API_KEY" ]; then
+            echo "NUGET_API_KEY secret not set — skipping push. Add it under repo Settings > Secrets and variables > Actions to enable publishing."
+            exit 0
+          fi
+          dotnet nuget push "dist-nuget/*.nupkg" \
+            --api-key "$NUGET_API_KEY" \
+            --source https://api.nuget.org/v3/index.json \
+            --skip-duplicate
+
   # Only on a version tag: gather every platform bundle and publish the release.
   publish:
     needs: [windows-bundle, unix-bundle]

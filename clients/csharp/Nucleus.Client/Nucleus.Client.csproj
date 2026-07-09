@@ -9,12 +9,16 @@
     <NoWarn>$(NoWarn);CS1591</NoWarn>
 
     <PackageId>Nucleus.Client</PackageId>
-    <Version>0.1.0</Version>
+    <!-- Baseline for local `dotnet pack`; the release workflow overrides this
+         with -p:PackageVersion=<git tag> so the published package always
+         matches the Nucleus release it ships with. -->
+    <Version>1.1.0</Version>
     <Authors>Nucleus</Authors>
     <Description>Typed .NET client for the Nucleus RAG database HTTP API.</Description>
     <PackageTags>nucleus;rag;vector;search;embeddings</PackageTags>
     <PackageLicenseExpression>MIT OR Apache-2.0</PackageLicenseExpression>
-    <RepositoryUrl>https://github.com/your-org/nucleus</RepositoryUrl>
+    <RepositoryUrl>https://github.com/JavierFrauca/nucleus</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/JavierFrauca/nucleus</PackageProjectUrl>
   </PropertyGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
