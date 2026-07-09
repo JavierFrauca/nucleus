@@ -89,8 +89,9 @@ Guías detalladas en [`docs/`](docs/):
 
 - **C# / .NET** — [`clients/csharp/Nucleus.Client`](clients/csharp) (`netstandard2.0` + `net8.0`). El
   `release.yml` lo empaqueta y publica en NuGet.org como `Nucleus.Client` en cada tag
-  (requiere el secret `NUGET_API_KEY` del repo); hasta que se configure, referencia el
-  proyecto directamente.
+  vía **Trusted Publishing** (OIDC, sin API key de larga duración — requiere una
+  política en nuget.org + el secret `NUGET_USER` del repo con tu usuario de
+  nuget.org); hasta que se configure, referencia el proyecto directamente.
 - **JavaScript / TypeScript** — [`clients/typescript`](clients/typescript) (ESM, Node y navegador).
 - Otros lenguajes: genera un cliente desde [`docs/openapi.yaml`](docs/openapi.yaml).
 
