@@ -87,7 +87,10 @@ Guías detalladas en [`docs/`](docs/):
 
 **Cliente-servidor (HTTP)** — contra `nucleus-server`:
 
-- **C# / .NET** — [`clients/csharp/Nucleus.Client`](clients/csharp) (`netstandard2.0` + `net8.0`, NuGet-ready).
+- **C# / .NET** — [`clients/csharp/Nucleus.Client`](clients/csharp) (`netstandard2.0` + `net8.0`). El
+  `release.yml` lo empaqueta y publica en NuGet.org como `Nucleus.Client` en cada tag
+  (requiere el secret `NUGET_API_KEY` del repo); hasta que se configure, referencia el
+  proyecto directamente.
 - **JavaScript / TypeScript** — [`clients/typescript`](clients/typescript) (ESM, Node y navegador).
 - Otros lenguajes: genera un cliente desde [`docs/openapi.yaml`](docs/openapi.yaml).
 
