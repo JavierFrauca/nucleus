@@ -1,0 +1,40 @@
+name: ✨ Sugerencia
+description: Propón una mejora o una funcionalidad nueva.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: ¿Qué problema resuelve?
+      description: Explica la limitación o necesidad antes de proponer la solución.
+      placeholder: "No puedo ... / Me gustaría ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: ¿Qué te gustaría que pasara?
+      description: Describe la solución o alternativa que imaginaste.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternativas consideradas
+      description: ¿Qué probaste o qué viste en otros proyectos?
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Área
+      options:
+        - Motor (nucleus-core)
+        - Servidor HTTP (nucleus-server)
+        - FFI / cdylib
+        - Clientes (C#/TS)
+        - Documentación
+        - Otro
+    validations:
+      required: true

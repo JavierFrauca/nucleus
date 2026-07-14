@@ -1,0 +1,66 @@
+name: 🐛 Bug
+description: Reporta algo que no funciona como esperabas.
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ¡Gracias por reportar! Antes de nada, busca si ya existe un issue igual.
+        Si es una **vulnerabilidad de seguridad**, NO uses este formulario:
+        escribe al maintainer directamente (ver `docs/security.md`).
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: ¿Qué ha pasado?
+      description: Describe el comportamiento actual (el bug) y el esperado.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Pasos para reproducir
+      description: La secuencia mínima que reproduce el problema. Incluye la query/curl si aplica.
+      placeholder: |
+        1. Arranco el servidor con `...`
+        2. Ingesto `...`
+        3. Busco `...`
+        4. Veo: ...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Versión de Nucleus
+      placeholder: "1.1.0 (o tag del binario)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Modo
+      options:
+        - Servidor HTTP (nucleus-server)
+        - Embebido / DLL (nucleus-ffi)
+        - Librería Rust (nucleus-core)
+        - No estoy seguro
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Sistema operativo
+      placeholder: "Windows 11 x64 / Ubuntu 24.04 / macOS 14 (arm64)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs relevantes
+      description: Salida con `RUST_LOG=debug` alrededor del problema. Quita tokens/secretos.
+      render: shell

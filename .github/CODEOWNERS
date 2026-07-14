@@ -1,0 +1,24 @@
+# Code owners por defecto. GitHub pedirá revisión de estos equipos/personas
+# en los PRs que toquen las rutas indicadas. Ajusta los handles a tu organización.
+
+# Motor (núcleo del proyecto)
+crates/core/           @JavierFrauca
+crates/server/         @JavierFrauca
+crates/ffi/            @JavierFrauca
+
+# Clientes / SDKs
+clients/               @JavierFrauca
+
+# Empaquetado y releases
+packaging/             @JavierFrauca
+.github/workflows/     @JavierFrauca
+
+# Documentación
+docs/                  @JavierFrauca
+README.md              @JavierFrauca
+CONTRIBUTING.md        @JavierFrauca
+ROADMAP.md             @JavierFrauca
+
+# Configuración del repositorio
+.github/               @JavierFrauca
+Cargo.toml             @JavierFrauca
