@@ -1,0 +1,9 @@
+# Desactiva el issue blank para guiar a los templates.
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 Pregunta / discusión
+    url: https://github.com/JavierFrauca/nucleus/discussions
+    about: ¿Tienes una duda de uso o quieres hablar de una idea? Abre un Discussion.
+  - name: 🔒 Reportar vulnerabilidad de seguridad
+    url: https://github.com/JavierFrauca/nucleus/security/policy
+    about: NO uses un issue público. Escribe al maintainer (ver docs/security.md).

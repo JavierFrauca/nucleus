@@ -72,6 +72,9 @@ temp/
 *.swp
 *~
 
+# Agentes de IA locales (configuración por máquina/usuario)
+.claude/
+
 # ──────────────────────────────────────────────────────────────
 #  Sistema operativo
 # ──────────────────────────────────────────────────────────────
