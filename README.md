@@ -2,6 +2,9 @@
 
 [![Release](https://img.shields.io/github/v/release/JavierFrauca/nucleus?sort=semver)](https://github.com/JavierFrauca/nucleus/releases/latest)
 [![Descargar](https://img.shields.io/badge/descargar-windows%20%C2%B7%20linux%20%C2%B7%20macOS%20arm64-blue)](https://github.com/JavierFrauca/nucleus/releases/latest)
+[![CI](https://img.shields.io/github/actions/workflow/status/JavierFrauca/nucleus/ci.yml?branch=main&label=CI)](https://github.com/JavierFrauca/nucleus/actions/workflows/ci.yml)
+[![Licencia](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#licencia)
+[![Rust](https://img.shields.io/badge/rust-1.82%2B-orange)](https://www.rust-lang.org/)
 
 **Base de datos ad-hoc para RAG, embebible en tu aplicación.** Escrita en Rust.
 Nucleus es un motor todo-en-uno: almacena, indexa y **genera los embeddings en
@@ -76,6 +79,12 @@ Guías detalladas en [`docs/`](docs/):
 - [Dossier técnico](docs/dossier-tecnico.md) — guía completa de defensa: decisiones, alternativas, límites y preguntas difíciles.
 - [Resumen de defensa](docs/resumen-defensa.md) — one-pager para imprimir · [diagrama](docs/arquitectura.svg).
 - [Camino a la 1.0](docs/camino-a-1.0.md) — historial de cómo se llegó a 1.0.0 y el compromiso de estabilidad (SemVer) vigente desde esa versión.
+- [Seguridad](docs/security.md) — modelo de amenazas y endurecimiento de producción.
+- [Debugging](docs/debugging.md) — logs, síntomas comunes y diagnóstico.
+- [Testing y benchmarks](docs/testing.md) — cómo correr tests y benchmarks (Suite Criterion en `crates/core/benches/`).
+- [Integraciones RAG](docs/integrations.md) — cómo integrar con LangChain, LlamaIndex, .NET y Node.
+- [Ejemplos](docs/examples/) — ingesta masiva y pipeline RAG completo.
+- [Roadmap](ROADMAP.md) · [Contribuir](CONTRIBUTING.md) · [NuGet (C#)](docs/nuget.md).
 
 ## Clientes / SDKs
 
