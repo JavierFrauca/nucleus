@@ -150,7 +150,7 @@ var prompt = $"Contexto:\n{context}\n\nPregunta: ¿tipos de retención IRPF 2026
 // → envía `prompt` a tu LLM (OpenAI, Azure OpenAI, Ollama, etc.)
 ```
 
-El cliente se publica en NuGet como `Nucleus.Client`
+El cliente se publica en NuGet como `NucleusDatabase.Client`
 ([instalación](nuget.md)).
 
 ## Node.js / TypeScript — con el cliente oficial

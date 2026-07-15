@@ -6,6 +6,9 @@
 *.pdb
 # Cargo.lock SÍ se sube (es un binario/app, no una librería)
 
+# Salidas de build de .NET (paquetes NuGet locales, artefactos)
+/dist-nuget/
+
 # ──────────────────────────────────────────────────────────────
 #  Datos del motor / base de datos embebida (redb)
 # ──────────────────────────────────────────────────────────────

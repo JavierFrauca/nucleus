@@ -72,7 +72,7 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
 
-  # Pack and push Nucleus.Client (the HTTP client) to NuGet.org. Independent of
+  # Pack and push NucleusDatabase.Client (the HTTP client) to NuGet.org. Independent of
   # the native bundle jobs above (no `needs`) so a NuGet hiccup never blocks the
   # GitHub Release, and vice versa.
   #
@@ -83,7 +83,7 @@ jobs:
   # GitHub org/user>, Repository=nucleus, Workflow file=release.yml, Environment
   # blank; plus a NUGET_USER repo secret with your nuget.org username (not a key).
   nuget-publish:
-    name: nuget-publish (Nucleus.Client)
+    name: nuget-publish (NucleusDatabase.Client)
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:

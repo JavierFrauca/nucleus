@@ -97,7 +97,7 @@ Guías detalladas en [`docs/`](docs/):
 **Cliente-servidor (HTTP)** — contra `nucleus-server`:
 
 - **C# / .NET** — [`clients/csharp/Nucleus.Client`](clients/csharp) (`netstandard2.0` + `net8.0`). El
-  `release.yml` lo empaqueta y publica en NuGet.org como `Nucleus.Client` en cada tag
+  `release.yml` lo empaqueta y publica en NuGet.org como `NucleusDatabase.Client` en cada tag
   vía **Trusted Publishing** (OIDC, sin API key de larga duración — requiere una
   política en nuget.org + el secret `NUGET_USER` del repo con tu usuario de
   nuget.org); hasta que se configure, referencia el proyecto directamente.

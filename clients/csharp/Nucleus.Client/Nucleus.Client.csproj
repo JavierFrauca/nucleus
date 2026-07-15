@@ -8,7 +8,7 @@
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
 
-    <PackageId>Nucleus.Client</PackageId>
+    <PackageId>NucleusDatabase.Client</PackageId>
     <!-- Baseline for local `dotnet pack`; the release workflow overrides this
          with -p:PackageVersion=<git tag> so the published package always
          matches the Nucleus release it ships with. -->

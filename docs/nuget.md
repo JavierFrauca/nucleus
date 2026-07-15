@@ -1,8 +1,12 @@
 # Cliente .NET (NuGet)
 
-[`Nucleus.Client`](../clients/csharp/Nucleus.Client) es el cliente HTTP tipado
+[`NucleusDatabase.Client`](../clients/csharp/Nucleus.Client) es el cliente HTTP tipado
 para .NET, que habla con `nucleus-server`. Se publica en **NuGet.org** como
-`Nucleus.Client` automáticamente con cada *tag* de versión.
+`NucleusDatabase.Client` automáticamente con cada *tag* de versión.
+
+> El ID de paquete es `NucleusDatabase.Client` (el prefijo `Nucleus.` estaba
+> reservado por otro publicador en NuGet.org, así que usamos `NucleusDatabase`).
+> El **namespace** del código sigue siendo `Nucleus.Client` (`using Nucleus.Client;`).
 
 > Para el **modo embebido** (sin HTTP, P/Invoke sobre `nucleus.dll`), usa
 > [`Nucleus.Native`](../clients/csharp/Nucleus.Native), que no va a NuGet sino
@@ -13,12 +17,12 @@ para .NET, que habla con `nucleus-server`. Se publica en **NuGet.org** como
 ### Desde NuGet (recomendado)
 
 ```bash
-dotnet add package Nucleus.Client
+dotnet add package NucleusDatabase.Client
 ```
 
 ```xml
 <!-- O directamente en el .csproj -->
-<PackageReference Include="Nucleus.Client" Version="1.1.0" />
+<PackageReference Include="NucleusDatabase.Client" Version="1.2.0" />
 ```
 
 > El paquete apunta a `netstandard2.0` y `net8.0`: funciona en .NET Framework
@@ -83,8 +87,8 @@ Los errores llegan como `NucleusApiException` (con `.StatusCode` y mensaje). La
 
 ## Versiones y SemVer
 
-- El paquete NuGet sigue la **misma versión** que el tag (`v1.1.0` → NuGet
-  `1.1.0`).
+- El paquete NuGet sigue la **misma versión** que el tag (`v1.2.0` → NuGet
+  `1.2.0`).
 - Desde la 1.0, la API HTTP (y por tanto este cliente) sigue
   [SemVer](camino-a-1.0.md): un cambio incompatible sube el *major*.
 
