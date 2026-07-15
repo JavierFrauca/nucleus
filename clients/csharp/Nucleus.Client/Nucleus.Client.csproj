@@ -12,14 +12,19 @@
     <!-- Baseline for local `dotnet pack`; the release workflow overrides this
          with -p:PackageVersion=<git tag> so the published package always
          matches the Nucleus release it ships with. -->
-    <Version>1.1.0</Version>
-    <Authors>Nucleus</Authors>
+    <Version>1.2.3</Version>
+    <Authors>JavierFrauca</Authors>
     <Description>Typed .NET client for the Nucleus RAG database HTTP API.</Description>
     <PackageTags>nucleus;rag;vector;search;embeddings</PackageTags>
     <PackageLicenseExpression>MIT OR Apache-2.0</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
     <RepositoryUrl>https://github.com/JavierFrauca/nucleus</RepositoryUrl>
     <PackageProjectUrl>https://github.com/JavierFrauca/nucleus</PackageProjectUrl>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
     <PackageReference Include="System.Text.Json" Version="8.0.5" />
